@@ -112,7 +112,11 @@ def trial(provider, config, workload, block, *, existing=None, smoke=False):
                     box.launch(DEADLINE)
                     sample['launch_ms'] = (time.monotonic() - started) * 1000
                 nonce = f'{token}-{mode}'
-                argv = ['sh', '-c', SMOKE, 'sh', nonce] if smoke else box.payload('run.mjs', workload, nonce)
+                if smoke:
+                    script = 'test -f README.md && ' + SMOKE if provider == 'tesser' else SMOKE
+                    argv = ['sh', '-c', script, 'sh', nonce]
+                else:
+                    argv = box.payload('run.mjs', workload, nonce)
                 remaining = max(.01, DEADLINE - (time.monotonic() - started))
                 output = box.exec(argv, remaining)
                 if smoke:
@@ -139,6 +143,11 @@ def trial(provider, config, workload, block, *, existing=None, smoke=False):
                     row['machine']['requested_site'] = config.get('site') or config.get('region')
             except Exception as error:
                 row['machine_error'] = error_text(error)
+            try:
+                with deadline(15):
+                    row['provider_placement'] = box.placement()
+            except Exception as error:
+                row['placement_error'] = error_text(error)
     finally:
         try:
             with deadline(35):
@@ -191,6 +200,8 @@ def run_series(args, config):
     for provider in providers:
         if not config[provider].get(ARTIFACT_KEY[provider]):
             raise ValueError(f'Prepare {provider} and set {ARTIFACT_KEY[provider]} in the config')
+    if 'e2b' in providers and not os.environ.get('E2B_API_KEY'):
+        raise ValueError('Set E2B_API_KEY before starting a series that includes E2B')
     day = 0
     if not args.pilot:
         if args.client_region != 'us-east' or args.start_date is None:
@@ -251,7 +262,8 @@ def report(path):
     for row in rows:
         groups[row['provider'], row['workload']].append(row)
     target = 1 if manifest['pilot'] else 30
-    complete = all(len(groups[p, w]) == target for p in manifest['providers'] for w in WORKLOADS)
+    complete = all(sorted(r['block'] for r in groups[p, w]) == list(range(target))
+                   for p in manifest['providers'] for w in WORKLOADS)
     print('# Benchpress results\n')
     if manifest['pilot'] or not complete:
         print('Pilot or incomplete experiment. Do not use these samples for a public comparison.\n')
@@ -277,7 +289,7 @@ def report(path):
             launch = statistics.median(r['cold']['launch_ms'] for r in phases)
             read = statistics.median(r['cold']['guest']['read_ms'] for r in phases)
             compute = statistics.median(r['cold']['guest']['compute_ms'] for r in phases)
-            print(f'- {provider} fresh one-pass medians: launch {launch:.2f} ms, guest read {read:.2f} ms, guest compute {compute:.2f} ms.')
+            print(f'- {provider} fresh one-pass medians: launch call {launch:.2f} ms, guest read {read:.2f} ms, guest compute {compute:.2f} ms.')
     if complete and not manifest['pilot'] and 'tesser' in manifest['providers']:
         base = {r['block']: r['cold']['wall_ms'] for r in groups['tesser', 'one'] if r['cold']['status'] == 'ok'}
         for provider in manifest['providers']:

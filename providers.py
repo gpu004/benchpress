@@ -124,6 +124,19 @@ class Sandbox:
             return ['sh', '-c', script_command, 'sh', script, *args]
         return ['/opt/benchpress/node', f'/opt/benchpress/{script}', *args]
 
+    def placement(self):
+        if self.provider == 'namespace':
+            boxes = json.loads(command([self.binary, 'list', '--output', 'json'], timeout=15))
+            box = next(b for b in boxes if b['name'] == self.id)
+            return {'site': box.get('site'), 'shape': box.get('instance_shape')}
+        if self.provider == 'tesser':
+            box = json.loads(command([self.binary, 'status', self.id, '--json'], timeout=15))
+            return {key: box[key] for key in ('region', 'site', 'size', 'fleet') if key in box}
+        if self.provider == 'e2b':
+            info = self.handle.get_info(request_timeout=10)
+            return {'vcpu': info.cpu_count, 'memory_mib': info.memory_mb, 'domain': info.sandbox_domain}
+        return {}
+
     def close(self):
         if self.existing:
             return 'existing_box_kept'
@@ -194,9 +207,11 @@ def prepare(provider, settings, name):
     old = Path.cwd()
     try:
         os.chdir(ROOT)
+        files = ['payload/' + name for name in ('prepare.sh', 'fixture.mjs', 'run.mjs', 'machine.mjs')]
         template = Template().from_image('node:22.23.4-bookworm-slim').copy(
-            'payload', '/tmp/benchpress-payload',
-        ).run_cmd('sh /tmp/benchpress-payload/prepare.sh /opt/benchpress && rm -rf /tmp/benchpress-payload')
+            files, '/tmp/benchpress-payload/', user='root',
+        ).run_cmd('sh /tmp/benchpress-payload/prepare.sh /opt/benchpress && rm -rf /tmp/benchpress-payload',
+                  user='root')
         Template.build(template, name, cpu_count=2, memory_mb=4096)
     finally:
         os.chdir(old)
