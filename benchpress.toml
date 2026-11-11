@@ -12,6 +12,8 @@ price_source = "https://modal.com/pricing"
 
 [e2b]
 region_label = "account endpoint"
+usd_per_hour = 0.1656
+price_source = "https://e2b.dev/pricing"
 
 [namespace]
 size = "s"

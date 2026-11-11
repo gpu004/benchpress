@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import random
+import re
 import signal
 import socket
 import statistics
@@ -19,7 +20,7 @@ import tomllib
 import uuid
 from zoneinfo import ZoneInfo
 
-from providers import PAYLOAD, PROVIDERS, ROOT, Sandbox, prepare
+from providers import PAYLOAD, PROVIDERS, ROOT, Sandbox, e2b_key, prepare
 
 NODE = (ROOT / '.node-version').read_text().strip()
 WORKLOADS = ('one', 'ten', 'token')
@@ -38,6 +39,7 @@ def now():
 
 def error_text(error):
     message = str(error).replace(os.environ.get('E2B_API_KEY') or '\x00', '<redacted>')
+    message = re.sub(r'\b(?:sk_)?e2b_[A-Za-z0-9_-]{16,}\b', '<redacted>', message)
     return f'{type(error).__name__}: {message}'[-1800:]
 
 
@@ -200,8 +202,8 @@ def run_series(args, config):
     for provider in providers:
         if not config[provider].get(ARTIFACT_KEY[provider]):
             raise ValueError(f'Prepare {provider} and set {ARTIFACT_KEY[provider]} in the config')
-    if 'e2b' in providers and not os.environ.get('E2B_API_KEY'):
-        raise ValueError('Set E2B_API_KEY before starting a series that includes E2B')
+    if 'e2b' in providers:
+        e2b_key()
     day = 0
     if not args.pilot:
         if args.client_region != 'us-east' or args.start_date is None:

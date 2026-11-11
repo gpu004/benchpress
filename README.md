@@ -4,7 +4,7 @@ Benchpress measures how long a short command takes to return a verified result o
 
 ## Set up and smoke-test
 
-Use Python 3.12 and install the pinned SDKs with `uv sync --locked --python 3.12`. Install and sign in to the [Tesser CLI](https://tesser.sh/docs/quickstart), [Modal](https://modal.com/docs/guide/sandboxes), and the [Namespace Devbox CLI](https://namespace.so/blog/devbox-test-with-skills). Supply `E2B_API_KEY` in the runner process environment. Do not put credentials in the provider TOML or commit them.
+Use Python 3.12 and install the pinned SDKs with `uv sync --locked --python 3.12`. Install and sign in to the [Tesser CLI](https://tesser.sh/docs/quickstart), [Modal](https://modal.com/docs/guide/sandboxes), and the [Namespace Devbox CLI](https://namespace.so/blog/devbox-test-with-skills). For E2B, use `e2b auth login` or supply `E2B_API_KEY` in the runner process environment. Do not put credentials in the provider TOML or commit them.
 
 ```sh
 uv run --locked python benchpress.py smoke tesser
@@ -28,13 +28,13 @@ snapshot = "your-tesser-snapshot-id"
 image = "your-modal-image-id"
 
 [e2b]
-template = "your-e2b-template-alias"
+template = "your-e2b-template-id"
 
 [namespace]
 image = "your-namespace-image-name"
 ```
 
-Record preparation charges separately when the provider exposes them. `benchpress.toml` includes list rates for the default Tesser and Modal configurations. Override `usd_per_hour` when your plan, size or region changes the rate. Omitted rates produce unknown costs. Use a unique experiment directory per set of artifact IDs. Keep images for the full experiment and remove them using their providers' tooling when finished.
+Record preparation charges separately when the provider exposes them. `benchpress.toml` includes list rates for the default Tesser, Modal, and E2B configurations. Override `usd_per_hour` when your plan, size or region changes the rate. Omitted rates produce unknown costs. Use a unique experiment directory per set of artifact IDs. Keep images for the full experiment and remove them using their providers' tooling when finished.
 
 Run a pilot before the formal comparison. You can limit it to available providers with `--providers modal namespace`.
 

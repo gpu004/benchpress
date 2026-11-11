@@ -35,6 +35,19 @@ def cli(name):
     return binary
 
 
+def e2b_key():
+    if key := os.environ.get('E2B_API_KEY'):
+        return key
+    try:
+        config = json.loads((Path.home() / '.e2b/config.json').read_text())
+    except (OSError, ValueError):
+        config = {}
+    key = config.get('projectApiKey') if isinstance(config, dict) else None
+    if isinstance(key, str) and key:
+        return key
+    raise RuntimeError('Run e2b auth login or set E2B_API_KEY in the client environment')
+
+
 class Sandbox:
     def __init__(self, provider, settings, name, *, smoke=False, existing=None):
         self.provider, self.settings, self.name = provider, settings, name
@@ -62,8 +75,7 @@ class Sandbox:
             import e2b
             from importlib.metadata import version
 
-            if not os.environ.get('E2B_API_KEY'):
-                raise RuntimeError('Set E2B_API_KEY in the client environment')
+            self.e2b_api_key = e2b_key()
             self.e2b = e2b
             self.version = version('e2b')
 
@@ -101,6 +113,7 @@ class Sandbox:
             self.handle = self.e2b.Sandbox.create(
                 **({} if self.smoke else {'template': settings['template']}),
                 metadata={'benchpress_trial': self.name}, timeout=TTL, request_timeout=timeout,
+                api_key=self.e2b_api_key,
             )
             self.id = self.handle.sandbox_id
 
@@ -115,7 +128,8 @@ class Sandbox:
             if proc.wait():
                 raise RuntimeError(f'Modal command exited {proc.returncode}: {proc.stderr.read()[-1600:]}')
             return output
-        result = self.handle.commands.run(shlex.join(argv), timeout=timeout, request_timeout=timeout)
+        seconds = max(1, math.ceil(timeout))
+        result = self.handle.commands.run(shlex.join(argv), timeout=seconds, request_timeout=seconds)
         return result.stdout
 
     def payload(self, script, *args):
@@ -171,13 +185,12 @@ class Sandbox:
 
                 matches = self.e2b.Sandbox.list(
                     query=SandboxQuery(metadata={'benchpress_trial': self.name}), limit=2,
-                    request_timeout=15,
+                    request_timeout=15, api_key=self.e2b_api_key,
                 ).next_items()
                 if len(matches) != 1:
                     return 'creation_unconfirmed'
                 self.id = matches[0].sandbox_id
-                self.handle = self.e2b.Sandbox.connect(self.id, request_timeout=15)
-            self.handle.kill(request_timeout=15)
+            self.e2b.Sandbox.kill(self.id, request_timeout=15, api_key=self.e2b_api_key)
         return 'removed'
 
 
@@ -201,18 +214,11 @@ def prepare(provider, settings, name):
         return {'image': image.object_id}
     from e2b import Template
 
-    if not os.environ.get('E2B_API_KEY'):
-        raise RuntimeError('Set E2B_API_KEY in the client environment')
-    # Template COPY sources are relative to the build client's working directory.
-    old = Path.cwd()
-    try:
-        os.chdir(ROOT)
-        files = ['payload/' + name for name in ('prepare.sh', 'fixture.mjs', 'run.mjs', 'machine.mjs')]
-        template = Template().from_image('node:22.23.4-bookworm-slim').copy(
-            files, '/tmp/benchpress-payload/', user='root',
-        ).run_cmd('sh /tmp/benchpress-payload/prepare.sh /opt/benchpress && rm -rf /tmp/benchpress-payload',
-                  user='root')
-        Template.build(template, name, cpu_count=2, memory_mb=4096)
-    finally:
-        os.chdir(old)
-    return {'template': name}
+    api_key = e2b_key()
+    files = ['prepare.sh', 'fixture.mjs', 'run.mjs', 'machine.mjs']
+    template = Template(file_context_path=PAYLOAD).from_image('node:22.23.4-bookworm-slim').copy(
+        files, '/tmp/benchpress-payload/', user='root',
+    ).run_cmd('sh /tmp/benchpress-payload/prepare.sh /opt/benchpress && rm -rf /tmp/benchpress-payload',
+              user='root')
+    build = Template.build(template, name=name, cpu_count=2, memory_mb=4096, api_key=api_key)
+    return {'template': build.template_id}
