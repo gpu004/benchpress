@@ -7,8 +7,8 @@ price_source = "https://tesser.sh/pricing"
 [modal]
 app = "benchpress-sandboxes"
 region_label = "automatic placement"
-usd_per_hour = 0.079128
-price_source = "https://modal.com/pricing"
+usd_per_hour = 0.23796
+price_source = "https://modal.com/products/sandboxes#active-resource-sandbox-pricing"
 
 [e2b]
 region_label = "account endpoint"
@@ -18,3 +18,5 @@ price_source = "https://e2b.dev/pricing"
 [namespace]
 size = "s"
 region_label = "closest site"
+usd_per_hour = 0.24
+price_source = "https://namespace.so/pricing.md"

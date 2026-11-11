@@ -34,7 +34,7 @@ template = "your-e2b-template-id"
 image = "your-namespace-image-name"
 ```
 
-Record preparation charges separately when the provider exposes them. `benchpress.toml` includes list rates for the default Tesser, Modal, and E2B configurations. Override `usd_per_hour` when your plan, size or region changes the rate. Omitted rates produce unknown costs. Use a unique experiment directory per set of artifact IDs. Keep images for the full experiment and remove them using their providers' tooling when finished.
+Record preparation charges separately when the provider exposes them. `benchpress.toml` includes list rates for the default configurations, including the product-specific Modal Sandbox rate and the Namespace S Devbox rate. Override `usd_per_hour` when your plan, size or region changes the rate. Omitted rates produce unknown costs. Use a unique experiment directory per set of artifact IDs. Keep images for the full experiment and remove them using their providers' tooling when finished.
 
 Run a pilot before the formal comparison. You can limit it to available providers with `--providers modal namespace`.
 
