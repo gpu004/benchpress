@@ -233,7 +233,9 @@ def prepare(provider, settings, name):
         import modal
 
         app = modal.App.lookup(settings['app'], create_if_missing=True)
-        image = modal.Image.from_registry('python:3.15.2-slim-trixie').apt_install('curl', 'xz-utils')
+        image = modal.Image.from_registry('python:3.15.2-slim-trixie').apt_install(
+            'curl', 'xz-utils', 'libatomic1',
+        )
         image = image.add_local_dir(PAYLOAD, '/tmp/benchpress-payload', copy=True).run_commands(
             'sh /tmp/benchpress-payload/prepare.sh /opt/benchpress && rm -rf /tmp/benchpress-payload',
         )

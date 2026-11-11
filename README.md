@@ -2,22 +2,22 @@
 
 Benchpress measures how long a short command takes to return a verified result on Tesser, Modal, E2B, and Namespace. The primary comparison is one pass over a 32 MiB fixture on a fresh box. The runner also measures the same command on the running box, a ten-pass variant, and a command that returns a nonce. The guest uses Node 26.13.1 and returns a checksum, record count, and guest timings. The Modal, E2B, and Namespace images use Debian 13 Trixie. Tesser uses its managed Ubuntu base.
 
-## Historical pilot results
+## Pilot results
 
-On November 11, 2026, Tesser, Modal, and E2B each ran three workloads using Node 22.23.4. Each workload ran on a fresh box from a prepared image or snapshot, then again on that same running box. Fresh timings start at the launch request. Running timings start when the client sends the command. Both end when the client verifies the result.
+On November 11, 2026, Tesser, Modal, and E2B each ran three workloads using Node 26.13.1. Each workload ran on a fresh box from a prepared image or snapshot, then again on that same running box. Fresh timings start at the launch request. Running timings start when the client sends the command. Both end when the client verifies the result.
 
-The Tesser pilot used `tesser exec`, which synchronized the local checkout before each timed command. That extra work affected both Tesser timing windows and its lifecycle cost estimate. A new pilot is needed for the prepared-sandbox comparison.
+Tesser timed commands used `tesser ssh` against a box started with `tesser make --snapshot`, so the local checkout was not synced into the timed path. An earlier same-day pilot that used `tesser exec` inflated Tesser’s running-box times and is superseded by these numbers.
 
 | Provider | Token, fresh / running | One pass, fresh / running | Ten passes, fresh / running | Verified commands |
 |---|---:|---:|---:|---:|
-| Tesser Standard | 4.740 / 1.844 s | 4.989 / 1.858 s | 6.786 / 3.555 s | 6/6 |
-| Modal Sandbox | 1.062 / 0.197 s | 1.350 / 0.484 s | 3.832 / 3.053 s | 6/6 |
-| E2B | 4.921 / 0.121 s | 3.531 / 0.574 s | 4.708 / 2.993 s | 6/6 |
+| Tesser Standard | 5.021 / 1.214 s | 5.307 / 1.297 s | 6.498 / 2.604 s | 6/6 |
+| Modal Sandbox | 1.613 / 0.319 s | 1.555 / 0.519 s | 2.436 / 1.768 s | 6/6 |
+| E2B | 2.832 / 0.129 s | 3.484 / 0.449 s | 4.739 / 3.021 s | 6/6 |
 | Namespace | — | — | — | Launch rejected |
 
-Guest compute time on the fresh ten-pass workload was 1.982 s on Tesser, 2.696 s on E2B, and 3.080 s on Modal. All pilot boxes were cleaned up. An existing Namespace box passed a smoke test, but the account's one-box limit blocked a fresh launch.
+Guest compute time on the fresh ten-pass workload was 1.668 s on Tesser, 1.629 s on Modal, and 2.916 s on E2B. All timed pilot boxes were cleaned up. An existing Namespace box passed a smoke test, but the account's one-box limit blocked a fresh launch.
 
-Each timing is one observation. The providers ran separately from the same client, with different machine configurations and placement. The pilot does not establish a typical speedup, CPU oversubscription, or build and test performance. The planned three-day series is pending, and Boat was not timed.
+Each timing is one observation. The providers ran from the same client in one interleaved pilot, with different machine configurations and placement. The pilot does not establish a typical speedup, CPU oversubscription, or build and test performance. The planned three-day series is pending, and Boat was not timed.
 
 ## Pricing comparison
 
@@ -35,7 +35,7 @@ USD list rates checked November 11, 2026. The hour columns show compute usage be
 
 Boat's $20 monthly minimum covers either example for both sizes. Tesser Pro includes $20 of usage in its $20 monthly fee. Amp's $20 Megawatt plan lists 45,000 hosted orb minutes. The Modal row uses the Sandbox rate for the reservation we tested. [Boat pricing](https://boat.dev/) · [Tesser pricing](https://tesser.sh/pricing) · [Amp plans](https://ampcode.com/pricing) · [Modal Sandbox billing](https://modal.com/docs/guide/sandbox-resources)
 
-In the one-pass pilot, estimated compute cost per verified result was **$0.000083 for Modal**, **$0.000102 for E2B**, and **$0.000122 for Tesser**. Each estimate uses the full box lifecycle through cleanup, divided by the two verified commands. These are list-rate estimates, not invoices.
+In the one-pass pilot, estimated compute cost per verified result was **$0.000099 for E2B**, **$0.000103 for Tesser**, and **$0.001084 for Modal**. Each estimate uses the full box lifecycle through cleanup, divided by the two verified commands. Modal’s client-observed lifecycle was about 33 s per box in this run, mostly after the verified commands, so its cost estimate is dominated by create and terminate time rather than the workload. These are list-rate estimates, not invoices.
 
 ## Set up and smoke-test
 
