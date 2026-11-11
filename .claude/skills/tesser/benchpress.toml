@@ -1,0 +1,7 @@
+ports = [3039]
+size = "standard"
+
+[run]
+setup = 'sh payload/prepare.sh "$HOME/.benchpress"'
+setup_inputs = [".node-version", "payload/**"]
+dev = '''node -e 'require("node:http").createServer((_, res) => res.end("benchpress\n")).listen(3039, "127.0.0.1")' '''

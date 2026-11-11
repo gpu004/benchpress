@@ -1,0 +1,18 @@
+[tesser]
+size = "standard"
+region_label = "US, exact region unreported"
+usd_per_hour = 0.08
+price_source = "https://tesser.sh/pricing"
+
+[modal]
+app = "benchpress-sandboxes"
+region_label = "automatic placement"
+usd_per_hour = 0.079128
+price_source = "https://modal.com/pricing"
+
+[e2b]
+region_label = "account endpoint"
+
+[namespace]
+size = "s"
+region_label = "closest site"
