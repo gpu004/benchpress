@@ -1,3 +1,3 @@
-FROM node:22.23.4-bookworm-slim
+FROM node:26.13.1-trixie-slim
 COPY . /tmp/benchpress-payload
 RUN sh /tmp/benchpress-payload/prepare.sh /opt/benchpress && rm -rf /tmp/benchpress-payload

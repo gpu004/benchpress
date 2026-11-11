@@ -1,8 +1,18 @@
 [project]
 name = "benchpress-sandboxes"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = "==3.15.2"
 dependencies = ["e2b==2.63.0", "modal==1.6.3"]
 
 [tool.uv]
 package = false
+required-version = "==0.13.7"
+exclude-newer-package = { "markdown-it-py" = false, pyqwest = false }
+constraint-dependencies = ["markdown-it-py==4.3.0", "protobuf-py-ext==0.7.0"]
+# E2B 2.63.0 declares upper bounds below these versions.
+override-dependencies = [
+    "connectrpc==0.13.0",
+    "protobuf-py==0.7.0",
+    "pyqwest==0.14.0",
+    "wcmatch==12.0.1",
+]

@@ -55,6 +55,33 @@ class WorkloadTests(unittest.TestCase):
         pairs = {index: (3 * (index + 1), index + 1) for index in range(30)}
         self.assertEqual(benchpress.interval(pairs), (3.0, 3.0))
 
+    def test_tesser_syncs_only_for_the_smoke_test(self):
+        argv = ['sh', '-c', 'printf "%s\\n" "$1"', 'sh', 'a nonce']
+        for smoke, subcommand in ((False, 'ssh'), (True, 'exec')):
+            with (
+                self.subTest(smoke=smoke),
+                patch('providers.cli', return_value='tesser'),
+                patch('providers.command', return_value='[]') as command,
+            ):
+                box = benchpress.Sandbox('tesser', {}, 'test', smoke=smoke, existing='box_abc')
+                command.return_value = 'a nonce\n'
+                self.assertEqual(box.exec(argv, 12.5), 'a nonce\n')
+                command.assert_called_with(['tesser', subcommand, 'box_abc', '--', *argv], timeout=12.5)
+
+    def test_e2b_command_supplies_the_connectrpc_stream_type(self):
+        from connectrpc.method import MethodInfo, StreamType
+        from e2b.envd.process import process_connect, process_pb
+
+        with (
+            patch.object(process_connect, 'MethodInfo', MethodInfo),
+            patch('providers.e2b_key', return_value='test'),
+        ):
+            benchpress.Sandbox('e2b', {}, 'test')
+            client = process_connect.ProcessClientSync('http://localhost')
+            with patch.object(client, 'execute_server_stream') as execute:
+                client.start(process_pb.StartRequest())
+            self.assertIs(execute.call_args.kwargs['method'].stream_type, StreamType.SERVER_STREAM)
+
 
 if __name__ == '__main__':
     unittest.main()

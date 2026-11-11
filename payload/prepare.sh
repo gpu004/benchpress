@@ -3,15 +3,15 @@ set -eu
 
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 dest=${1:?provide a destination directory}
-version=22.23.4
+version=26.13.1
 mkdir -p "$dest"
 
 if command -v node >/dev/null && [ "$(node -p process.versions.node)" = "$version" ]; then
     cp -L "$(command -v node)" "$dest/node"
 else
     case "$(uname -m)" in
-        x86_64) arch=x64; sha=1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce ;;
-        aarch64|arm64) arch=arm64; sha=6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b ;;
+        x86_64) arch=x64; sha=5c063e46bab0fbc1c17cc445d7ff129cbdcd0471be6ed83b6ab864f8143bc864 ;;
+        aarch64|arm64) arch=arm64; sha=89e1853138db51e8b82d3e98ba9c0d3f2956a28e5e55ea1b7e12d25aae92d5dd ;;
         *) echo 'Unsupported Linux architecture' >&2; exit 1 ;;
     esac
     tmp=$(mktemp -d)

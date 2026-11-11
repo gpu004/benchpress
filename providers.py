@@ -48,6 +48,30 @@ def e2b_key():
     raise RuntimeError('Run e2b auth login or set E2B_API_KEY in the client environment')
 
 
+def _patch_e2b_process_method_info():
+    # E2B 2.63.0's generated process client omits the stream type required by connectrpc 0.13.
+    from connectrpc.method import MethodInfo, StreamType
+    from e2b.envd.process import process_connect
+
+    if process_connect.MethodInfo is not MethodInfo:
+        return
+    stream_types = {
+        'unary': StreamType.UNARY,
+        'client_streaming': StreamType.CLIENT_STREAM,
+        'server_streaming': StreamType.SERVER_STREAM,
+        'bidi_streaming': StreamType.BIDI_STREAM,
+    }
+    methods = {
+        method.name: stream_types[method.method_kind]
+        for method in process_connect.ProcessSync.desc().methods
+    }
+
+    def method_info(*, name, **kwargs):
+        return MethodInfo(name=name, stream_type=methods[name], **kwargs)
+
+    process_connect.MethodInfo = method_info
+
+
 class Sandbox:
     def __init__(self, provider, settings, name, *, smoke=False, existing=None):
         self.provider, self.settings, self.name = provider, settings, name
@@ -75,6 +99,7 @@ class Sandbox:
             import e2b
             from importlib.metadata import version
 
+            _patch_e2b_process_method_info()
             self.e2b_api_key = e2b_key()
             self.e2b = e2b
             self.version = version('e2b')
@@ -119,7 +144,9 @@ class Sandbox:
 
     def exec(self, argv, timeout):
         if self.provider == 'tesser':
-            return command([self.binary, 'exec', self.id, '--', *argv], timeout=timeout)
+            # The smoke test checks checkout sync. Benchmarks use the snapshot payload.
+            subcommand = 'exec' if self.smoke else 'ssh'
+            return command([self.binary, subcommand, self.id, '--', *argv], timeout=timeout)
         if self.provider == 'namespace':
             return command([self.binary, 'exec', self.id, '--', *argv], timeout=timeout)
         if self.provider == 'modal':
@@ -206,7 +233,7 @@ def prepare(provider, settings, name):
         import modal
 
         app = modal.App.lookup(settings['app'], create_if_missing=True)
-        image = modal.Image.from_registry('node:22.23.4-bookworm-slim', add_python='3.12')
+        image = modal.Image.from_registry('python:3.15.2-slim-trixie').apt_install('curl', 'xz-utils')
         image = image.add_local_dir(PAYLOAD, '/tmp/benchpress-payload', copy=True).run_commands(
             'sh /tmp/benchpress-payload/prepare.sh /opt/benchpress && rm -rf /tmp/benchpress-payload',
         )
@@ -216,7 +243,7 @@ def prepare(provider, settings, name):
 
     api_key = e2b_key()
     files = ['prepare.sh', 'fixture.mjs', 'run.mjs', 'machine.mjs']
-    template = Template(file_context_path=PAYLOAD).from_image('node:22.23.4-bookworm-slim').copy(
+    template = Template(file_context_path=PAYLOAD).from_image('node:26.13.1-trixie-slim').copy(
         files, '/tmp/benchpress-payload/', user='root',
     ).run_cmd('sh /tmp/benchpress-payload/prepare.sh /opt/benchpress && rm -rf /tmp/benchpress-payload',
               user='root')

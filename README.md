@@ -1,10 +1,12 @@
 # Benchpress
 
-Benchpress measures how long a short command takes to return a verified result on Tesser, Modal, E2B, and Namespace. The primary comparison is one pass over a 32 MiB fixture on a fresh box. The runner also measures the same command on the running box, a ten-pass variant, and a command that returns a nonce. The guest uses Node 22.23.4 and returns a checksum, record count, and guest timings.
+Benchpress measures how long a short command takes to return a verified result on Tesser, Modal, E2B, and Namespace. The primary comparison is one pass over a 32 MiB fixture on a fresh box. The runner also measures the same command on the running box, a ten-pass variant, and a command that returns a nonce. The guest uses Node 26.13.1 and returns a checksum, record count, and guest timings. The Modal, E2B, and Namespace images use Debian 13 Trixie. Tesser uses its managed Ubuntu base.
 
-## Pilot results
+## Historical pilot results
 
-On November 11, 2026, Tesser, Modal, and E2B each ran three workloads. Each workload ran on a fresh box from a prepared image or snapshot, then again on that same running box. Fresh timings start at the launch request. Running timings start when the client sends the command. Both end when the client verifies the result.
+On November 11, 2026, Tesser, Modal, and E2B each ran three workloads using Node 22.23.4. Each workload ran on a fresh box from a prepared image or snapshot, then again on that same running box. Fresh timings start at the launch request. Running timings start when the client sends the command. Both end when the client verifies the result.
+
+The Tesser pilot used `tesser exec`, which synchronized the local checkout before each timed command. That extra work affected both Tesser timing windows and its lifecycle cost estimate. A new pilot is needed for the prepared-sandbox comparison.
 
 | Provider | Token, fresh / running | One pass, fresh / running | Ten passes, fresh / running | Verified commands |
 |---|---:|---:|---:|---:|
@@ -13,7 +15,7 @@ On November 11, 2026, Tesser, Modal, and E2B each ran three workloads. Each work
 | E2B | 4.921 / 0.121 s | 3.531 / 0.574 s | 4.708 / 2.993 s | 6/6 |
 | Namespace | — | — | — | Launch rejected |
 
-Modal returned the one-pass result first in both runs. Tesser spent the least time computing inside the fresh box on the ten-pass workload: 1.982 s, compared with 2.696 s on E2B and 3.080 s on Modal. Modal still returned that result first end to end. All pilot boxes were cleaned up. An existing Namespace box passed a smoke test, but the account's one-box limit blocked a fresh launch.
+Guest compute time on the fresh ten-pass workload was 1.982 s on Tesser, 2.696 s on E2B, and 3.080 s on Modal. All pilot boxes were cleaned up. An existing Namespace box passed a smoke test, but the account's one-box limit blocked a fresh launch.
 
 Each timing is one observation. The providers ran separately from the same client, with different machine configurations and placement. The pilot does not establish a typical speedup, CPU oversubscription, or build and test performance. The planned three-day series is pending, and Boat was not timed.
 
@@ -37,7 +39,7 @@ In the one-pass pilot, estimated compute cost per verified result was **$0.00008
 
 ## Set up and smoke-test
 
-Use Python 3.12 and install the pinned SDKs with `uv sync --locked --python 3.12`. Install and sign in to the [Tesser CLI](https://tesser.sh/docs/quickstart), [Modal](https://modal.com/docs/guide/sandboxes), and the [Namespace Devbox CLI](https://namespace.so/blog/devbox-test-with-skills). For E2B, use `e2b auth login` or supply `E2B_API_KEY` in the runner process environment. Do not put credentials in the provider TOML or commit them.
+Use uv 0.13.7 and install the pinned SDKs with `uv sync --locked --python 3.15.2`. Install and sign in to the [Tesser CLI](https://tesser.sh/docs/quickstart), [Modal](https://modal.com/docs/guide/sandboxes), and the [Namespace Devbox CLI](https://namespace.so/blog/devbox-test-with-skills). For E2B, use `e2b auth login` or supply `E2B_API_KEY` in the runner process environment. Do not put credentials in the provider TOML or commit them.
 
 ```sh
 uv run --locked python benchpress.py smoke tesser
@@ -47,11 +49,11 @@ uv run --locked python benchpress.py smoke namespace --existing YOUR_DEVBOX_NAME
 uv run --locked python benchpress.py smoke namespace
 ```
 
-The existing Namespace box is retained. Each other smoke test uses a disposable box. Smoke tests verify command execution and cleanup, while a pilot also verifies the prepared image, workload, and timing path.
+The existing Namespace box is retained. Each other smoke test uses a disposable box. Smoke tests verify command execution and cleanup. The Tesser smoke test uses `tesser exec` to check that the checkout sync puts `README.md` on the box. A pilot also verifies the prepared image, workload, and timing path.
 
 ## Prepare and run
 
-Commit the Tesser manifest and `payload/` before preparing Tesser. Run `uv run --locked python benchpress.py prepare PROVIDER` for each provider. It prints the artifact identifier and preparation time. Copy the returned values into a local `benchpress.local.toml`:
+Rebuild the artifacts before running with a new Node version. Commit the Tesser manifest and `payload/` before preparing Tesser. Run `uv run --locked python benchpress.py prepare PROVIDER` for each provider. It prints the artifact identifier and preparation time. Copy the returned values into a local `benchpress.local.toml`:
 
 ```toml
 [tesser]
@@ -69,7 +71,7 @@ image = "your-namespace-image-name"
 
 Record preparation charges separately when the provider exposes them. `benchpress.toml` includes list rates for the default configurations, including the product-specific Modal Sandbox rate and the Namespace S Devbox rate. Override `usd_per_hour` when your plan, size or region changes the rate. Omitted rates produce unknown costs. Use a unique experiment directory per set of artifact IDs. Keep images for the full experiment and remove them using their providers' tooling when finished.
 
-Run a pilot before the formal comparison. You can limit it to available providers with `--providers modal namespace`.
+For Tesser, the benchmark starts a box with `tesser make --snapshot` and runs the prepared payload with `tesser ssh <box_id> -- …`, which skips checkout sync for both fresh and running-box commands. Run a pilot before the formal comparison. You can limit it to available providers with `--providers modal namespace`.
 
 ```sh
 uv run --locked python benchpress.py --config benchpress.local.toml run --pilot --out results/pilot
