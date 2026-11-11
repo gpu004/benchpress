@@ -2,6 +2,39 @@
 
 Benchpress measures how long a short command takes to return a verified result on Tesser, Modal, E2B, and Namespace. The primary comparison is one pass over a 32 MiB fixture on a fresh box. The runner also measures the same command on the running box, a ten-pass variant, and a command that returns a nonce. The guest uses Node 22.23.4 and returns a checksum, record count, and guest timings.
 
+## Pilot results
+
+On November 11, 2026, Tesser, Modal, and E2B each ran three workloads. Each workload ran on a fresh box from a prepared image or snapshot, then again on that same running box. Fresh timings start at the launch request. Running timings start when the client sends the command. Both end when the client verifies the result.
+
+| Provider | Token, fresh / running | One pass, fresh / running | Ten passes, fresh / running | Verified commands |
+|---|---:|---:|---:|---:|
+| Tesser Standard | 4.740 / 1.844 s | 4.989 / 1.858 s | 6.786 / 3.555 s | 6/6 |
+| Modal Sandbox | 1.062 / 0.197 s | 1.350 / 0.484 s | 3.832 / 3.053 s | 6/6 |
+| E2B | 4.921 / 0.121 s | 3.531 / 0.574 s | 4.708 / 2.993 s | 6/6 |
+| Namespace | — | — | — | Launch rejected |
+
+Modal returned the one-pass result first in both runs. Tesser spent the least time computing inside the fresh box on the ten-pass workload: 1.982 s, compared with 2.696 s on E2B and 3.080 s on Modal. Modal still returned that result first end to end. All pilot boxes were cleaned up. An existing Namespace box passed a smoke test, but the account's one-box limit blocked a fresh launch.
+
+Each timing is one observation. The providers ran separately from the same client, with different machine configurations and placement. The pilot does not establish a typical speedup, CPU oversubscription, or build and test performance. The planned three-day series is pending, and Boat was not timed.
+
+## Pricing comparison
+
+USD list rates checked November 11, 2026. The hour columns show compute usage before minimums, credits, storage, or network charges.
+
+| Product | Configuration | USD/hour | 100 h | 500 h |
+|---|---|---:|---:|---:|
+| [Boat Small](https://boat.dev/) | 2 vCPU, 4 GB | $0.0180 | $1.80 | $9.00 |
+| [Boat Default](https://boat.dev/) | 4 vCPU, 8 GB | $0.0360 | $3.60 | $18.00 |
+| [Tesser Standard](https://tesser.sh/pricing) | 2 vCPU, 8 GB | $0.0800 | $8.00 | $40.00 |
+| [E2B](https://e2b.dev/pricing) | 2 vCPU, 4 GiB | $0.1656 | $16.56 | $82.80 |
+| [Amp Orb Small](https://ampcode.com/docs/orbs/sizes-and-costs) | 2 CPU, 4 GB | $0.1700 | $17.00 | $85.00 |
+| [Modal Sandbox](https://modal.com/products/sandboxes#active-resource-sandbox-pricing) | 1 physical core, 4 GiB | $0.2380 | $23.80 | $118.98 |
+| [Namespace Devbox S](https://namespace.so/pricing.md#devbox-sizes) | Up to 4 vCPU, 8 GB | $0.2400 | $24.00 | $120.00 |
+
+Boat's $20 monthly minimum covers either example for both sizes. Tesser Pro includes $20 of usage in its $20 monthly fee. Amp's $20 Megawatt plan lists 45,000 hosted orb minutes. The Modal row uses the Sandbox rate for the reservation we tested. [Boat pricing](https://boat.dev/) · [Tesser pricing](https://tesser.sh/pricing) · [Amp plans](https://ampcode.com/pricing) · [Modal Sandbox billing](https://modal.com/docs/guide/sandbox-resources)
+
+In the one-pass pilot, estimated compute cost per verified result was **$0.000083 for Modal**, **$0.000102 for E2B**, and **$0.000122 for Tesser**. Each estimate uses the full box lifecycle through cleanup, divided by the two verified commands. These are list-rate estimates, not invoices.
+
 ## Set up and smoke-test
 
 Use Python 3.12 and install the pinned SDKs with `uv sync --locked --python 3.12`. Install and sign in to the [Tesser CLI](https://tesser.sh/docs/quickstart), [Modal](https://modal.com/docs/guide/sandboxes), and the [Namespace Devbox CLI](https://namespace.so/blog/devbox-test-with-skills). For E2B, use `e2b auth login` or supply `E2B_API_KEY` in the runner process environment. Do not put credentials in the provider TOML or commit them.
@@ -10,7 +43,7 @@ Use Python 3.12 and install the pinned SDKs with `uv sync --locked --python 3.12
 uv run --locked python benchpress.py smoke tesser
 uv run --locked python benchpress.py smoke modal
 uv run --locked python benchpress.py smoke e2b
-uv run --locked python benchpress.py smoke namespace --existing rose-derive-2tej
+uv run --locked python benchpress.py smoke namespace --existing YOUR_DEVBOX_NAME
 uv run --locked python benchpress.py smoke namespace
 ```
 
