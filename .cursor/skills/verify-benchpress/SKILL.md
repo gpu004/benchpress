@@ -51,6 +51,8 @@ Offline (default proof path):
 ```sh
 .cursor/skills/verify-benchpress/helpers/drive-report.sh
 .cursor/skills/verify-benchpress/helpers/drive-tests.sh
+.cursor/skills/verify-benchpress/helpers/drive-resolve-cleanup.sh
+.cursor/skills/verify-benchpress/helpers/drive-reconcile.sh
 ```
 
 Manual equivalents (same observables):
@@ -61,7 +63,8 @@ cp fixtures/pilot/attempts.jsonl fixtures/pilot/experiment.json \
   "$BENCHPRESS_VERIFY_SCRATCH/report-fixture/"
 uv run --locked python benchpress.py report \
   "$BENCHPRESS_VERIFY_SCRATCH/report-fixture"
-uv run --locked --group dev python -m unittest test_benchpress test_providers test_allocation test_allocation_model -v
+uv run --locked --group dev python -m unittest \
+  test_benchpress test_providers test_allocation test_allocation_model test_cleanup -v
 uv run --locked --group dev python test_properties.py
 ```
 
@@ -83,10 +86,11 @@ Proof lives in `$BENCHPRESS_VERIFY_EVIDENCE` (default `.cursor/skills/verify-ben
 
 Standards:
 
-- Exercise the real CLI entry points (`benchpress.py report|smoke|prepare|run`), not internal Python setters.
+- Exercise the real CLI entry points (`benchpress.py report|smoke|prepare|run|resolve-cleanup|reconcile`), not internal Python setters.
 - Capture the command outcome and resulting artifacts (stdout/stderr/exit code plus written files).
 - For report: require `report.md`, `report.json`, `report.csv`, and at least one SVG under `plots/`.
 - For report content: require the pilot banner, a `tesser | one | cold` table row, wall p50 `5813.44` from the fixture, and `plots/one-cold-wall.svg`.
+- For resolve-cleanup / reconcile: seed scratch state, drive the CLI, and keep the receipt or allocation phase change under evidence.
 - Mocks are only acceptable inside the unit/property suite; do not mock providers when driving smoke/prepare/run.
 - Credential-gated features that cannot run must be reported as failed/unreachable with the unmet precondition — do not mark them verified via a different path.
 
@@ -108,6 +112,8 @@ All helpers are executable under `.cursor/skills/verify-benchpress/helpers/`:
 | `doctor.sh` | Read-only readiness check |
 | `drive-report.sh` | Report against `fixtures/pilot/`; copy proof |
 | `drive-tests.sh` | Unit + property tests; copy transcripts |
+| `drive-resolve-cleanup.sh` | Seed cleanup warning; drive `resolve-cleanup`; copy receipt |
+| `drive-reconcile.sh` | Seed allocation journal; drive `reconcile`; copy phase change |
 | `cleanup.sh` | Delete scratch; retain evidence |
 
 ## Feature map

@@ -29,7 +29,7 @@ Preconditions:
 
 ## Gotchas
 
-- Parallel prepares race on `payload/.benchpress-variant`. Run one prepare at a time.
+- Prepare writes `.benchpress-variant` only inside a temp payload copy (or a private Tesser clone), never the live `payload/` tree. Parallel prepares are still heavy on provider quotas; prefer one at a time.
 - `payload/prepare.sh` must succeed inside the build; a broken npm copy aborts preparation.
 - Missing auth fails prepare. Report unreachable rather than simulating an id.
 - Writing the returned id into `benchpress.local.toml` is a user config step; verification may record the id in evidence without editing the user's local file unless asked.

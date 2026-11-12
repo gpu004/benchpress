@@ -1,6 +1,6 @@
 # Pilot run
 
-A pilot run executes a short interleaved timed series into an `--out` directory, writing `experiment.json` and `attempts.jsonl` the report command can consume.
+A pilot run executes a short timed experiment into an `--out` directory, writing `experiment.json` and `attempts.jsonl` the report command can consume. Standard and resume pilots interleave scheduled attempts; burst pilots launch concurrent boxes instead.
 
 ## Sub-features
 
@@ -26,7 +26,7 @@ Preconditions:
 
 - **Narrow pilot.** Example: `uv run --locked python benchpress.py --config benchpress.local.toml run --pilot --providers modal --workloads token --out "$BENCHPRESS_VERIFY_SCRATCH/pilot-modal-token"`.
 - **Confirm outputs.** The out dir contains `experiment.json` and at least one line in `attempts.jsonl`.
-- **Confirm attempt shape.** A JSONL row has `provider`, `workload`, `cold.status`, and `cleanup`.
+- **Confirm attempt shape.** A JSONL row has `provider`, `workload`, and `cold.status`. Successful closes also include `cleanup`; some connect-failure rows omit it.
 - **Report the out dir.** `uv run --locked python benchpress.py report "$BENCHPRESS_VERIFY_SCRATCH/pilot-modal-token"` writes `report.md` with the pilot banner.
 - **Proof.** Copy `experiment.json`, `attempts.jsonl`, `report.md`, and command transcripts into `$BENCHPRESS_VERIFY_EVIDENCE/pilot-run/`.
 

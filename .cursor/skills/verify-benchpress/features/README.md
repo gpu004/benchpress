@@ -41,6 +41,8 @@ Each feature file starts with an H1 title and one paragraph describing the user-
 
 - [Report from fixture](./report-from-fixture.md) — offline report generation from sanitized pilot rows.
 - [Unit and property tests](./unit-and-property-tests.md) — local unittest + hegel suite.
+- [Resolve cleanup](./resolve-cleanup.md) — operator receipt for a saved cleanup warning.
+- [Reconcile allocation](./reconcile-allocation.md) — operator receipt for a blocked allocation journal entry.
 - [Smoke a provider](./smoke-provider.md) — disposable (or existing Namespace) smoke box.
 - [Prepare an artifact](./prepare-artifact.md) — build provider image/snapshot/template.
 - [Pilot run](./pilot-run.md) — short timed pilot into an isolated `--out` directory.
