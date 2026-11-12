@@ -26,7 +26,7 @@ python_version="$(uv run --locked python -c 'import sys; print("%d.%d.%d" % sys.
 [[ "$python_version" == "3.15.2" ]] || fail "python $python_version; need 3.15.2 via uv"
 ok "python $python_version"
 
-uv run --locked --group dev python -c 'import benchpress, report, lifecycle, providers, stats, scenarios, constants, hegel' \
+uv run --locked --group dev python -c 'import benchpress, report, lifecycle, providers, stats, scenarios, constants, allocation, hegel' \
   || fail "python imports failed (need uv sync --group dev)"
 ok "benchpress modules import"
 
