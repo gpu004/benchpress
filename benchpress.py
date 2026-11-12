@@ -20,7 +20,7 @@ from constants import (
 from lifecycle import NODE, PING, Session, error_text, run_mode, verify
 from providers import PAYLOAD, PROVIDERS, ROOT, VARIANTS, Sandbox, prepare
 from report import report
-from scenarios import MODES, fingerprint, run_series, schedule
+from scenarios import MODES, fingerprint, resolve_cleanup, run_series, schedule
 from stats import bootstrap_median, interval, ratio_ready
 
 
@@ -83,8 +83,32 @@ def main():
     run.add_argument("--start-date", type=date.fromisoformat)
     run.add_argument("--seed", type=int, default=7256)
     sub.add_parser("report").add_argument("path", type=Path)
+    resolve = sub.add_parser(
+        "resolve-cleanup", help="Record manual evidence of an exact allocation's terminal outcome"
+    )
+    resolve.add_argument("--out", type=Path, required=True)
+    resolve.add_argument("--attempt", required=True, help="Full attempt ID from the cleanup error")
+    resolve.add_argument("--resolved-by", required=True, help="Operator who verified the outcome")
+    resolve.add_argument(
+        "--allocation-scope", required=True, help="Verified account and allocation"
+    )
+    resolve.add_argument(
+        "--evidence", required=True, help="Evidence of ownership and terminal state"
+    )
+    resolve.add_argument("--confirmed-outcome", choices=("removed", "absent"), required=True)
     args = parser.parse_args()
     try:
+        if args.action == "resolve-cleanup":
+            receipt = resolve_cleanup(
+                args.out,
+                args.attempt,
+                resolved_by=args.resolved_by,
+                allocation_scope=args.allocation_scope,
+                evidence=args.evidence,
+                confirmed_outcome=args.confirmed_outcome,
+            )
+            print(json.dumps(receipt, indent=2))
+            return 0
         config = settings(args.config)
         if args.action == "report":
             report(args.path)

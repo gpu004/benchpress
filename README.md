@@ -104,6 +104,18 @@ uv run --locked python benchpress.py report results/pilot
 
 Use one fixed client in US East. The harness does not run a second client region; every report states that single-region limit. Run the command below with the same arguments once each day on three consecutive Eastern calendar dates, starting on the chosen date. It runs ten randomized blocks per day. Resuming on the same date skips recorded attempts. Each block runs every provider and selected workload, with fresh and running-box commands capped at two minutes each. Default workloads are `one ten token cores disk net install`. Pass `--workloads` to narrow a run. `--mode burst --concurrency N` launches N boxes at once per provider. `--mode resume` times sleep/pause then wake/resume on Tesser, Modal, and E2B; Namespace is recorded as unsupported. Modal resume requires a workspace with access to experimental persistent sandboxes.
 
+Saved `cleanup="failed"` and `cleanup="creation_unconfirmed"` rows block further launches in that experiment, including after a restart or on a later day. The error lists the affected attempt ID, provider, allocation name, and known box ID. Verify ownership and remove that exact allocation, or obtain authoritative evidence that it is terminally absent. Then record the manual resolution:
+
+```sh
+uv run --locked python benchpress.py resolve-cleanup --out results/main \
+  --attempt FULL_ATTEMPT_ID_FROM_ERROR --resolved-by YOUR_OPERATOR_ID \
+  --allocation-scope 'provider account/project and exact allocation ID or creation request' \
+  --confirmed-outcome removed \
+  --evidence 'ownership evidence and provider deletion/terminal-state receipt'
+```
+
+Use `--confirmed-outcome absent` only for a confirmed terminal absence. A lost creation response, failed lookup, ambiguous match, empty list, or elapsed TTL alone does not establish absence. Keep the experiment blocked until the exact creation is accounted for. This command records an operator attestation; it does not query providers or delete boxes. It requires the full attempt ID and nonempty operator, scope, and evidence fields. Receipts are persisted separately under `cleanup-resolutions/` with the allocation identity and UTC time. Original measurements remain unchanged and recorded attempts remain skipped. Run and resolution commands use the same experiment lock. Burst runs drain and save their already-submitted workers before stopping on a cleanup warning; existing burst outputs still require a new directory. Allocations interrupted before an attempt row was saved are outside this guard, as tracked in [issue #2](https://github.com/gpu004/benchpress/issues/2).
+
 ```sh
 uv run --locked python benchpress.py --config benchpress.local.toml run \
   --client-region us-east --start-date YYYY-MM-DD --out results/main
