@@ -276,6 +276,10 @@ class AllocationJournal:
                     raise entry.blocked("saved result differs from journal")
                 if state["phase"] == "result_committed":
                     continue
+                # Never jump to result_committed without cleanup_confirmed_at. A crash after
+                # resolve-cleanup persists its receipt but before journal.cleaned() must heal here.
+                if state["phase"] != "cleanup_confirmed":
+                    entry.cleaned(recovered_at=timestamp())
                 # Sync a complete row that survived a crash before the writer's fsync.
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -304,14 +308,8 @@ class AllocationJournal:
                 entry.save(interrupted_at=timestamp())
             self.commit(stream, row, write_attempt)
             rows.append(row)
-        # Older experiments have no allocation receipts to resolve these warnings.
-        for row in rows:
-            if row.get("cleanup") in ("failed", "creation_unconfirmed") and not row.get(
-                "allocation_id"
-            ):
-                raise RecoveryBlocked(
-                    f"Legacy cleanup warning for {attempt_key(row)}, box_id={row.get('box_id')!r}; manually reconcile before continuing"
-                )
+        # Legacy cleanup warnings (no allocation_id) are gated by require_cleanup_resolved /
+        # resolve-cleanup receipts in scenarios.py. Do not hard-reject resolved receipts here.
         return rows
 
 

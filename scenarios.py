@@ -170,6 +170,8 @@ def resolve_cleanup(out, attempt_id, *, resolved_by, allocation_scope, evidence,
         finally:
             if temporary and os.path.exists(temporary):
                 os.unlink(temporary)
+        # Journal update is after the receipt so a failed receipt publish cannot leave
+        # cleanup_confirmed without evidence. reconcile_results heals the inverse crash window.
         if allocation_id := row.get("allocation_id"):
             manifest = json.loads((out / "experiment.json").read_text())
             journal = AllocationJournal(out, manifest)
@@ -301,33 +303,40 @@ def locked_experiment(args, manifest, *, reject_existing_attempts=False):
     with experiment_lock(args.out):
         if manifest_path.exists():
             saved = json.loads(manifest_path.read_text())
-            experiment_id = saved.pop("experiment_id", None)
-            if saved != manifest:
-                raise ValueError("Experiment configuration changed; choose a new results directory")
+            experiment_id = saved.get("experiment_id")
+            saved_manifest = {key: value for key, value in saved.items() if key != "experiment_id"}
             if experiment_id is None:
                 experiment_id = uuid.uuid4().hex
-                durable_json(manifest_path, {**manifest, "experiment_id": experiment_id})
+                durable_json(manifest_path, {**saved_manifest, "experiment_id": experiment_id})
+            if not isinstance(experiment_id, str) or uuid.UUID(hex=experiment_id).hex != experiment_id:
+                raise RecoveryBlocked("Invalid experiment ID; scheduling blocked")
+            # Unresolved cleanup must win over filter/config changes so operators still see the
+            # resolve-cleanup path when they narrow providers or workloads.
+            recovery_manifest = {**saved_manifest, "experiment_id": experiment_id}
+            journal = AllocationJournal(args.out, recovery_manifest)
+            journal.recover()
+            rows = read_rows(attempts_path)
+            require_cleanup_resolved(rows, args.out, journal)
+            if saved_manifest != manifest:
+                raise ValueError("Experiment configuration changed; choose a new results directory")
+            manifest["experiment_id"] = experiment_id
         else:
             experiment_id = uuid.uuid4().hex
             durable_json(manifest_path, {**manifest, "experiment_id": experiment_id})
-        if not isinstance(experiment_id, str) or uuid.UUID(hex=experiment_id).hex != experiment_id:
-            raise RecoveryBlocked("Invalid experiment ID; scheduling blocked")
-        manifest["experiment_id"] = experiment_id
+            if not isinstance(experiment_id, str) or uuid.UUID(hex=experiment_id).hex != experiment_id:
+                raise RecoveryBlocked("Invalid experiment ID; scheduling blocked")
+            manifest["experiment_id"] = experiment_id
+            journal = AllocationJournal(args.out, manifest)
+            journal.recover()
+            rows = read_rows(attempts_path)
+            require_cleanup_resolved(rows, args.out, journal)
         if (
             reject_existing_attempts
             and attempts_path.exists()
             and attempts_path.read_text().strip()
         ):
             raise ValueError("Burst output already has attempts; choose a new results directory")
-        yield attempts_path
-
-
-def recover_then_read(args, manifest, attempts_path):
-    journal = AllocationJournal(args.out, manifest)
-    journal.recover()
-    rows = read_rows(attempts_path)
-    require_cleanup_resolved(rows, args.out, journal)
-    return journal, rows
+        yield attempts_path, journal, rows
 
 
 def run_burst(args, config):
@@ -339,8 +348,7 @@ def run_burst(args, config):
         workloads=("token",),
         extra_manifest={"burst_count": concurrency, "deadline_seconds": BURST_DEADLINE},
     )
-    with locked_experiment(args, manifest) as attempts_path:
-        journal, rows = recover_then_read(args, manifest, attempts_path)
+    with locked_experiment(args, manifest) as (attempts_path, journal, rows):
         with attempts_path.open("a") as stream:
             rows = journal.reconcile_results(rows, stream, write_attempt)
             require_cleanup_resolved(rows, args.out, journal)
@@ -397,8 +405,7 @@ def run_series(args, config):
         if day not in range(3):
             raise ValueError("Run once per Eastern calendar day from --start-date through day 3")
 
-    with locked_experiment(args, manifest) as attempts_path:
-        journal, rows = recover_then_read(args, manifest, attempts_path)
+    with locked_experiment(args, manifest) as (attempts_path, journal, rows):
         with attempts_path.open("a") as stream:
             rows = journal.reconcile_results(rows, stream, write_attempt)
             require_cleanup_resolved(rows, args.out, journal)

@@ -716,12 +716,107 @@ class JournalTests(unittest.TestCase):
                         "cleanup": cleanup,
                     }
                 ]
-                with (Path(tmp) / "attempts.jsonl").open("a") as stream:
-                    with self.assertRaisesRegex(RecoveryBlocked, "Legacy cleanup warning"):
-                        journal.reconcile_results(rows, stream, scenarios.write_attempt)
-                    rows[0]["allocation_id"] = "missing"
+                out = Path(tmp)
+                with self.assertRaisesRegex(RuntimeError, "Unresolved cleanup"):
+                    scenarios.require_cleanup_resolved(rows, out, journal)
+                with (out / "attempts.jsonl").open("a") as stream:
+                    scenarios.write_attempt(stream, rows[0])
+                    journal.reconcile_results(rows, stream, scenarios.write_attempt)
+                scenarios.resolve_cleanup(
+                    out,
+                    scenarios.cleanup_attempt_id(rows[0]),
+                    resolved_by="operator",
+                    allocation_scope="legacy fake scope",
+                    evidence="terminal evidence",
+                    confirmed_outcome="absent",
+                )
+                scenarios.require_cleanup_resolved(rows, out, journal)
+                with (out / "attempts.jsonl").open("a") as stream:
+                    journal.reconcile_results(rows, stream, scenarios.write_attempt)
+                rows[0]["allocation_id"] = "missing"
+                with (out / "attempts.jsonl").open("a") as stream:
                     with self.assertRaisesRegex(RecoveryBlocked, "Missing journal"):
                         journal.reconcile_results(rows, stream, scenarios.write_attempt)
+
+    def test_resolve_cleanup_receipt_without_journal_update_heals_on_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / "allocations").mkdir()
+            durable_json(
+                out / "experiment.json",
+                {
+                    "schema": 2,
+                    "pilot": True,
+                    "experiment_id": "0" * 32,
+                    "providers": ["modal"],
+                    "workloads": ["token"],
+                    "scenario": "standard",
+                },
+            )
+            allocation_id = "a" * 32
+            row = {
+                "block": 0,
+                "workload": "token",
+                "provider": "modal",
+                "scenario": "standard",
+                "experiment_id": "0" * 32,
+                "allocation_id": allocation_id,
+                "name": "benchpress-" + allocation_id,
+                "box_id": "box-1",
+                "cold": {"status": "ok"},
+                "warm": {"status": "ok"},
+                "cleanup": "failed",
+            }
+            state = {
+                "schema": 1,
+                "experiment_id": "0" * 32,
+                "attempt_key": {
+                    "block": 0,
+                    "workload": "token",
+                    "provider": "modal",
+                    "scenario": "standard",
+                },
+                "allocation_id": allocation_id,
+                "generation": 1,
+                "name": "benchpress-" + allocation_id,
+                "provider_scope": {"app": "fake-app", "image": "fake-image"},
+                "provider_identity": {
+                    "app": "fake-app",
+                    "name": "benchpress-" + allocation_id,
+                    "tags": {"benchpress_allocation": "benchpress-" + allocation_id},
+                },
+                "phase": "allocated",
+                "box_id": "box-1",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "result": row,
+            }
+            durable_json(out / "allocations" / f"{allocation_id}.json", state)
+            with (out / "attempts.jsonl").open("a") as stream:
+                scenarios.write_attempt(stream, row)
+            # Crash window: receipt published, journal still allocated.
+            receipt = {
+                "schema": 1,
+                "attempt_id": scenarios.cleanup_attempt_id(row),
+                "allocation": scenarios.allocation(row),
+                "confirmed_outcome": "removed",
+                "resolved_by": "operator",
+                "resolved_at": "2026-01-01T00:00:01+00:00",
+                "allocation_scope": "fake scope",
+                "evidence": "terminal evidence",
+            }
+            (out / "cleanup-resolutions").mkdir()
+            durable_json(
+                out / "cleanup-resolutions" / f"{receipt['attempt_id']}.json", receipt
+            )
+            journal = AllocationJournal(out, {"experiment_id": "0" * 32})
+            with (out / "attempts.jsonl").open("a") as stream:
+                journal.reconcile_results([row], stream, scenarios.write_attempt)
+            healed = json.loads((out / "allocations" / f"{allocation_id}.json").read_text())
+            self.assertEqual(healed["phase"], "result_committed")
+            self.assertIn("cleanup_confirmed_at", healed)
+            # A later restart must still accept the healed journal.
+            AllocationJournal(out, {"experiment_id": "0" * 32})
 
 
 if __name__ == "__main__":
