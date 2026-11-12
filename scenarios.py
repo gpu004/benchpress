@@ -6,6 +6,7 @@ import json
 import os
 import random
 import socket
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime
@@ -30,6 +31,127 @@ SOURCE_FILES = (
 )
 
 MODES = ("standard", "resume", "burst")
+CLEANUP_WARNINGS = ("failed", "creation_unconfirmed")
+
+
+def cleanup_warning(row):
+    return row.get("cleanup") in CLEANUP_WARNINGS
+
+
+def cleanup_attempt_id(row):
+    """Bind a recovery receipt to the complete original measurement, including its allocation."""
+    return hashlib.sha256(json.dumps(row, sort_keys=True, allow_nan=False).encode()).hexdigest()
+
+
+def allocation(row):
+    return {key: row.get(key) for key in ("provider", "name", "box_id")}
+
+
+def cleanup_resolved(row, out):
+    path = out / "cleanup-resolutions" / f"{cleanup_attempt_id(row)}.json"
+    if not path.exists():
+        return False
+    receipt = json.loads(path.read_text())
+    return (
+        receipt.get("schema") == 1
+        and receipt.get("attempt_id") == cleanup_attempt_id(row)
+        and receipt.get("allocation") == allocation(row)
+        and receipt.get("confirmed_outcome") in ("removed", "absent")
+        and all(
+            isinstance(receipt.get(key), str) and receipt[key].strip()
+            for key in ("resolved_by", "resolved_at", "allocation_scope", "evidence")
+        )
+    )
+
+
+def require_cleanup_resolved(rows, out):
+    unresolved = [row for row in rows if cleanup_warning(row) and not cleanup_resolved(row, out)]
+    if unresolved:
+        details = "\n".join(
+            f"attempt {cleanup_attempt_id(row)}: block={row.get('block')}, "
+            f"workload={row.get('workload')}, scenario={row.get('scenario', 'standard')}, "
+            f"allocation={json.dumps(allocation(row))}, cleanup={row['cleanup']}"
+            for row in unresolved
+        )
+        raise RuntimeError(
+            f"Unresolved cleanup in {out / 'attempts.jsonl'}:\n{details}\n"
+            "Verify ownership and a terminal outcome for this exact allocation, then record "
+            "the evidence with benchpress.py resolve-cleanup --out DIR --attempt ID "
+            "--resolved-by OPERATOR --allocation-scope SCOPE --evidence EVIDENCE "
+            "--confirmed-outcome removed|absent. Uncertain recovery must remain blocked."
+        )
+
+
+@contextmanager
+def experiment_lock(out):
+    with (out / ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+def resolve_cleanup(out, attempt_id, *, resolved_by, allocation_scope, evidence, confirmed_outcome):
+    """Record an operator-verified terminal outcome, without issuing any provider calls."""
+    if confirmed_outcome not in ("removed", "absent"):
+        raise ValueError("Cleanup requires a confirmed removed or absent outcome")
+    if not all(
+        isinstance(value, str) and value.strip()
+        for value in (resolved_by, allocation_scope, evidence)
+    ):
+        raise ValueError("Supply the operator, exact allocation scope, and terminal evidence")
+    with experiment_lock(out):
+        matches = [
+            row
+            for row in read_rows(out / "attempts.jsonl")
+            if cleanup_attempt_id(row) == attempt_id and cleanup_warning(row)
+        ]
+        if len(matches) != 1:
+            raise ValueError("Select exactly one saved cleanup warning by its full attempt ID")
+        row = matches[0]
+        if cleanup_resolved(row, out):
+            raise ValueError("This allocation already has a resolution record")
+        receipt = {
+            "schema": 1,
+            "attempt_id": attempt_id,
+            "allocation": allocation(row),
+            "confirmed_outcome": confirmed_outcome,
+            "resolved_by": resolved_by.strip(),
+            "resolved_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+            "allocation_scope": allocation_scope.strip(),
+            "evidence": evidence.strip(),
+        }
+        directory = out / "cleanup-resolutions"
+        directory.mkdir(exist_ok=True)
+        # Persist the receipt directory before publishing any receipt inside it.
+        with directory_fd(out) as fd:
+            os.fsync(fd)
+        path = directory / f"{attempt_id}.json"
+        temporary = None
+        published = False
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as stream:
+                temporary = stream.name
+                write_attempt(stream, receipt)
+            os.replace(temporary, path)
+            published = True
+            with directory_fd(directory) as fd:
+                os.fsync(fd)
+        except BaseException:
+            if published:
+                path.unlink()
+            raise
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
+        return receipt
+
+
+@contextmanager
+def directory_fd(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
 
 
 def schedule(providers, seed, blocks=SERIES_BLOCKS, workloads=WORKLOADS):
@@ -111,20 +233,17 @@ def open_experiment(args, config, *, mode, workloads, extra_manifest=None):
 def locked_experiment(args, manifest, *, reject_existing_attempts=False):
     manifest_path = args.out / "experiment.json"
     attempts_path = args.out / "attempts.jsonl"
-    with (args.out / ".lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with experiment_lock(args.out):
+        rows = read_rows(attempts_path)
+        require_cleanup_resolved(rows, args.out)
         if manifest_path.exists():
             if json.loads(manifest_path.read_text()) != manifest:
                 raise ValueError("Experiment configuration changed; choose a new results directory")
         else:
             manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-        if (
-            reject_existing_attempts
-            and attempts_path.exists()
-            and attempts_path.read_text().strip()
-        ):
+        if reject_existing_attempts and rows:
             raise ValueError("Burst output already has attempts; choose a new results directory")
-        yield attempts_path
+        yield attempts_path, rows
 
 
 def run_burst(args, config):
@@ -136,9 +255,10 @@ def run_burst(args, config):
         workloads=("token",),
         extra_manifest={"burst_count": concurrency, "deadline_seconds": BURST_DEADLINE},
     )
-    with locked_experiment(args, manifest, reject_existing_attempts=True) as attempts_path:
+    with locked_experiment(args, manifest, reject_existing_attempts=True) as (attempts_path, _):
         with attempts_path.open("a") as stream:
             for provider in providers:
+                rows = []
                 with ThreadPoolExecutor(max_workers=concurrency) as pool:
                     futures = [
                         pool.submit(run_mode, provider, config[provider], "burst", block=index)
@@ -147,10 +267,12 @@ def run_burst(args, config):
                     for future in as_completed(futures):
                         row = future.result()
                         write_attempt(stream, row)
+                        rows.append(row)
                         print(
                             f"burst {provider:9} {row['block']:02} {row['cold']['status']}",
                             flush=True,
                         )
+                require_cleanup_resolved(rows, args.out)
 
 
 def run_series(args, config):
@@ -170,10 +292,9 @@ def run_series(args, config):
         if day not in range(3):
             raise ValueError("Run once per Eastern calendar day from --start-date through day 3")
 
-    with locked_experiment(args, manifest) as attempts_path:
+    with locked_experiment(args, manifest) as (attempts_path, rows):
         done = {
-            (r["block"], r["workload"], r["provider"], r.get("scenario", "standard"))
-            for r in read_rows(attempts_path)
+            (r["block"], r["workload"], r["provider"], r.get("scenario", "standard")) for r in rows
         }
         with attempts_path.open("a") as stream:
             for block, workload, provider in schedule(
@@ -196,10 +317,8 @@ def run_series(args, config):
                 write_attempt(stream, row)
                 label = mode if mode != "standard" else workload
                 print(f"{block:02} {provider:9} {label:8} {row['cold']['status']}", flush=True)
-                if row["cold"]["status"] == "setup_error" or row.get("cleanup") in (
-                    "failed",
-                    "creation_unconfirmed",
-                ):
+                require_cleanup_resolved([row], args.out)
+                if row["cold"]["status"] == "setup_error":
                     raise RuntimeError(
                         f"Inspect {attempts_path} before continuing; setup or cleanup needs attention"
                     )
