@@ -154,6 +154,8 @@ class Session:
         self.budget = DEADLINE if budget is None else budget
         self.cold_started = time.monotonic()
         self.billable_ended = self.cold_started
+        self.allocation = None
+        self.journal_seconds = 0.0
 
     @classmethod
     def connect(
@@ -198,7 +200,12 @@ class Session:
         started = time.monotonic()
         with self._guard(self.budget):
             self.box.launch(self.budget)
-        return (time.monotonic() - started) * 1000
+        launch_ms = (time.monotonic() - started) * 1000
+        if self.allocation:
+            sync_started = time.monotonic()
+            self.allocation.allocated(self.box.id)
+            self.journal_seconds += time.monotonic() - sync_started
+        return launch_ms
 
     def exec_ping(self, label, *, started=None, budget=None):
         budget = self.budget if budget is None else budget
@@ -335,15 +342,23 @@ class Session:
             row["placement_error"] = error_text(error)
 
     def close_with_cost(self, row):
+        if self.allocation and self.box.id and self.allocation.state["phase"] == "create_pending":
+            self.allocation.allocated(self.box.id)
         try:
             with self._guard(35):
                 row["cleanup"] = self.box.close()
         except Exception as error:
             row.update(cleanup="failed", cleanup_error=error_text(error))
         row["box_id"] = self.box.id
+        if self.allocation and self.box.id and self.allocation.state["box_id"] is None:
+            self.allocation.allocated(self.box.id)
         apply_cost(
             row, self.config, cold_started=self.cold_started, billable_ended=self.billable_ended
         )
+        if self.allocation:
+            row["journal_seconds_during_cold"] = self.journal_seconds
+            if row["cleanup"] == "removed":
+                self.allocation.cleaned()
 
     def _cold_ok(self, row):
         return row.get("cold", {}).get("status") == "ok"
@@ -419,6 +434,7 @@ class Session:
         name_prefix="benchpress",
         setup_status="setup_error",
         start_wall_before_connect=False,
+        journal=None,
     ):
         if scenario == "resume" and RESUME_SUPPORT[provider] is None:
             return {
@@ -448,6 +464,16 @@ class Session:
             row["exec_overhead"] = {"status": "not_run"}
         if scenario == "resume":
             row["resume"] = {"status": "not_run"}
+        allocation = None
+        if journal:
+            if existing or smoke:
+                raise ValueError("Allocation journals are for scheduled disposable boxes")
+            allocation = journal.begin(provider, config, scenario, workload, block)
+            row.update(
+                name=allocation.state["name"],
+                allocation_id=allocation.state["allocation_id"],
+                experiment_id=journal.experiment_id,
+            )
         wall_started = time.monotonic()
         session, error = cls.connect(
             provider,
@@ -469,7 +495,12 @@ class Session:
                 row["cleanup"] = "not_run"
                 apply_cost(row, config, cold_started=wall_started, billable_ended=ended)
             row["cold"] = cold
+            if allocation:
+                # Adapter construction does not dispatch a sandbox create.
+                allocation.cleaned(no_create_dispatched=True)
             return row
+        session.allocation = allocation
+        session.box.allocation = allocation
         if start_wall_before_connect:
             session.cold_started = wall_started
             session.billable_ended = wall_started
@@ -499,7 +530,9 @@ MODE_STEPS = {
 }
 
 
-def run_mode(provider, config, mode, *, workload=None, block=None, existing=None, smoke=False):
+def run_mode(
+    provider, config, mode, *, workload=None, block=None, existing=None, smoke=False, journal=None
+):
     """Run one attempt for a named mode using that mode's step list."""
     if mode == "standard":
         return Session.run(
@@ -511,6 +544,7 @@ def run_mode(provider, config, mode, *, workload=None, block=None, existing=None
             scenario="standard",
             existing=existing,
             smoke=smoke,
+            journal=journal,
         )
     if mode == "resume":
         return Session.run(
@@ -520,6 +554,7 @@ def run_mode(provider, config, mode, *, workload=None, block=None, existing=None
             workload="token",
             block=block,
             scenario="resume",
+            journal=journal,
         )
     if mode == "burst":
         return Session.run(
@@ -534,5 +569,6 @@ def run_mode(provider, config, mode, *, workload=None, block=None, existing=None
             name_prefix="benchpress-burst",
             setup_status="failed",
             start_wall_before_connect=True,
+            journal=journal,
         )
     raise ValueError(f"Unknown mode: {mode}")

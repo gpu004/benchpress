@@ -5,7 +5,7 @@ Benchpress measures how long a short command takes to return a verified result o
 ## How the harness stays honest
 
 - Every result is verified. A per-run nonce, the record count, the byte count, and a SHA-256 checksum are all checked, so a fast wrong answer or a stale box counts as a failure, not a win.
-- Each run is a full lifecycle. It times launch, time to ready, and workload to a verified result, then runs warm commands on the same box. Cleanup always happens and is recorded, and the series stops if cleanup cannot be confirmed.
+- Each run is a full lifecycle. It times launch, time to ready, and workload to a verified result, then runs warm commands on the same box. The runner journals allocation intent before launch, attempts cleanup, and blocks on restart if an allocation or its cleanup remains uncertain.
 - The run order is designed. Providers and workloads are shuffled within each block from a fixed seed, and the plan of 10 blocks a day for 3 days is fixed in advance.
 - Runs are reproducible. Tool and package versions are pinned, the source is fingerprinted, a run will not resume if the configuration changed, and results are written safely to disk.
 - Failures count. Timeouts lower the completion rate, wall latency treats failures as the deadline, and the report gives no headline ratio for a pilot or an incomplete series.
@@ -123,3 +123,97 @@ uv run --locked python benchpress.py report results/main
 ```
 
 The JSONL records wall time split into launch call, time-to-ready, and workload, plus guest timings, status, scenario, billable vs full-lifecycle seconds, and machine details where available. A launch call can return before the box accepts commands; the runner probes with a ping until ready so that wait is not folded into the workload. After each successful cold command the runner issues five back-to-back no-op pings on the running box to measure command-send overhead (CLI/SSH per command on Tesser and Namespace versus reused SDK connections on Modal and E2B), then three warm workload commands; the report shows that ping overhead plus `warm-first` (not steady state) and `warm-median` across the three warm commands. CPU settings target two guest CPUs; the `cores` workload is what exercises both. Inspect `visible_cpus`, `available_parallelism`, CPU quota, memory and placement in the pilot before interpreting differences. Wall latency counts timeout, failure, setup error, and skipped warm attempts as the 120 s deadline so unreliable providers cannot look faster by dropping samples. Compare medians, p10–p90 spread, and per-day medians alongside the verified completion rate; p90 is labeled indicative because with 30 samples it rests on about three observations. The report stamps the source fingerprint, observed date range, configured `price_date`, client region, and the single-region limitation; prints wall and guest-compute medians with day-blocked bootstrap 95% intervals; and writes `report.md`, `report.json`, `report.csv`, and SVG strip plots under `plots/`. It also gives a paired block bootstrap interval for each provider versus Tesser on the primary one-pass workload when the series is complete and at least 29 of 30 attempts verified on each side with at least 29 paired blocks. Primary cost uses billable seconds through the last measured command and excludes harness metadata collection and cleanup wait; full-lifecycle cost is reported beside it. Host-level CPU allocation cannot be inferred from these samples.
+
+
+### Interrupted allocations and restart recovery
+
+Each scheduled disposable allocation has a durable `allocations/<allocation_id>.json`
+record. The manifest carries a persistent experiment ID. The allocation record
+contains its scheduled key, generation, remote lookup identity, non-secret scope
+references, phase, timestamps, and returned box ID. State writes fsync a temporary
+file, replace the state file, then fsync its directory before dispatching create.
+Burst workers write separate allocation files; only the coordinator appends results.
+Smoke and prepare commands are ad-hoc operations outside this experiment journal.
+
+Startup holds the experiment lock while validating all allocation records and
+recovering incomplete creates or cleanup. It does this before reading result rows
+or building the schedule. `create_pending` and `allocated` block new work until
+cleanup has a confirmed terminal outcome. `cleanup_confirmed` can then advance to
+`result_committed`. Recovery can repeat after another crash.
+
+Automatic recovery has deliberately limited provider coverage:
+
+| Provider | Recovery contract |
+| --- | --- |
+| Modal standard/burst | Resolve the recorded ID, or the exact name within the recorded app, including terminated sandboxes. Verify the allocation tag, durably record the ID, then terminate that exact sandbox with `wait=True`. An empty lookup or ownership mismatch blocks. |
+| Modal resume | Recover by ID and allocation tag. A lost response without a recorded ID requires manual reconciliation because persistent creates send no name. |
+| E2B | A recorded ID plus matching `benchpress_trial` metadata permits deletion of that exact sandbox. A missing ID or 404 requires manual reconciliation; metadata discovery does not establish create idempotency or absence in the original account. |
+| Namespace and Tesser | Manual reconciliation. Namespace's create name is recorded; Tesser currently sends no stable lookup identity. Their lookup/terminal-absence contracts have not been established for automatic recovery. |
+
+These checks use the active provider credentials. Preserve the original account
+and environment when recovering. No credentials are copied into allocation
+records. The Modal behavior follows the pinned SDK's
+[Sandbox contract](https://modal.com/docs/reference/modal.Sandbox), including unique
+names within an app, ownership tags, and repeatable termination. This change does
+not claim exactly-once provider creation or test live cloud recovery.
+
+A blocked error identifies the allocation record, scheduled key, remote identity,
+and known box ID. Reconcile that exact allocation in the original provider account,
+including any create request still in flight. Confirm that it can no longer become
+live before recording evidence:
+
+```sh
+uv run --locked python benchpress.py reconcile --out results/main \
+  --allocation ALLOCATION_ID --confirm-terminal --actor 'operator name' \
+  --evidence 'provider/account reference, exact allocation, terminal outcome and request evidence'
+```
+
+This command records the operator, evidence, and timestamp under the same lock.
+It is an operator attestation, not a provider lookup. It does not delete a box or
+rewrite measurement history. A rerun or an expired TTL alone is insufficient
+evidence. Do not delete pending records or use another results directory to bypass
+a block. Older cleanup-warning rows without an allocation journal remain blocked
+and require manual inspection; this command cannot resolve those legacy rows.
+
+After confirmed cleanup, an interrupted allocation without a durably staged result
+gets exactly one `cold.status="interrupted"` row. It counts as a failed attempt and
+uses the report's deadline censoring. The scheduled key is consumed; there is no
+automatic retry of that key within this experiment, and recovered boxes are never
+reused as cold samples. Missing timings and costs remain unknown. A result staged
+in the journal before the crash is preserved as measured, including original
+cleanup failures, and matched to JSONL by allocation ID to avoid duplicate samples.
+Cleanup receipts remain in the allocation files.
+
+Malformed journal state, mismatched results, duplicate keys, missing receipts, and
+partial trailing JSONL rows block scheduling. Recovery runs before result parsing,
+so a torn row cannot bypass cleanup. A torn row is preserved along with the staged
+result for operator reconciliation; the runner never truncates it automatically.
+Back up both files before repairing measurement data under the experiment lock.
+
+Intent fsync happens before lifecycle timing starts. `launch_ms` still measures
+only the provider call. Persisting the returned ID happens afterward and contributes
+to cold wall time, the remaining cold deadline, and billable/lifecycle time. Its
+cost is exposed as `journal_seconds_during_cold`. Cleanup-confirmation and result
+fsync happen after lifecycle timing. Normal `finally` cleanup remains in place.
+
+Run the local regression suite without cloud credentials:
+
+```sh
+uv run --locked --group dev python -m unittest test_allocation test_allocation_model -v
+```
+
+`test_allocation.py` adapts the [issue's safe reproducer](https://github.com/gpu004/benchpress/issues/1).
+It kills only child runners around intent dispatch, remote acceptance, returned-ID
+persistence, readiness, workload, cleanup, result append/flush/fsync, and final
+journal completion. Fake provider state survives each process, and a peer box must
+remain untouched. Tests also cover repeated recovery interruption, delayed or
+failed lookup, malformed state, manual-resolution write failure, experiment locks,
+healthy skipping, and burst recovery. Fsync tests kill immediately before/after
+the syscall; they do not simulate storage hardware losing acknowledged writes.
+
+`test_allocation_model.py` is an executable bounded model of
+`UnrecordedBoxBlocksLaunch`, with two scheduled keys and up to two restarts. It
+includes late create acceptance and torn result writes, and detects the original
+missing-journal restart bug when its safety gate is removed. The issue's original
+TLA+ source was not included in this repository. This model checks local ordering,
+not cloud contracts or arbitrary concurrent executions.

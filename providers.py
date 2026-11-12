@@ -94,6 +94,7 @@ class Sandbox:
         self.before = set()
         self.smoke = smoke
         self.resume = resume
+        self.allocation = None
         if provider == "tesser":
             self.binary = cli("tesser")
             self.version = command([self.binary, "--version"]).strip()
@@ -164,6 +165,7 @@ class Sandbox:
                 app=self.app,
                 image=self.image,
                 name=None if self.resume else self.name,
+                tags={"benchpress_allocation": self.name},
                 runtime="gvisor",
                 cpu=(1.0, 1.0),
                 memory=(4096, 4096),
@@ -286,7 +288,10 @@ class Sandbox:
                     self.handle = self.modal.Sandbox.from_name(self.settings["app"], self.name)
                 except self.modal.exception.NotFoundError:
                     return "creation_unconfirmed"
+                if self.handle.get_tags() != {"benchpress_allocation": self.name}:
+                    raise RuntimeError("Modal allocation ownership tags do not match")
                 self.id = self.handle.object_id
+            self._remember_cleanup_id()
             self.handle.terminate(wait=True)
         else:
             if not self.handle:
@@ -301,8 +306,15 @@ class Sandbox:
                 if len(matches) != 1:
                     return "creation_unconfirmed"
                 self.id = matches[0].sandbox_id
+            self._remember_cleanup_id()
             self.e2b.Sandbox.kill(self.id, request_timeout=15, api_key=self.e2b_api_key)
         return "removed"
+
+    def _remember_cleanup_id(self):
+        # A lost create response can reveal its ID only during cleanup lookup.
+        # Persist it before deletion so a second interruption can use that exact ID.
+        if self.allocation and self.id and self.allocation.state["phase"] == "create_pending":
+            self.allocation.allocated(self.id)
 
 
 def _tesser_snapshot(cwd):
@@ -405,3 +417,63 @@ def prepare(provider, settings, name, *, variant="default"):
         )
         build = Template.build(template, name=name, cpu_count=2, memory_mb=4096, api_key=api_key)
         return {"template": build.template_id, "variant": variant}
+
+
+def allocation_identity(provider, scope, name, scenario):
+    """The remote identity actually sent by launch, never a create-idempotency claim."""
+    if provider == "modal":
+        return {
+            "app": scope.get("app"),
+            "name": None if scenario == "resume" else name,
+            "tags": {"benchpress_allocation": name},
+        }
+    if provider == "namespace":
+        return {"name": name}
+    if provider == "e2b":
+        return {"metadata": {"benchpress_trial": name}}
+    return None
+
+
+def recover_allocation(allocation):
+    """Delete only an exact, verified allocation. An inconclusive lookup raises."""
+    state = allocation.state
+    provider = state["attempt_key"]["provider"]
+    identity = state["provider_identity"]
+    box_id = state["box_id"]
+    if provider == "modal":
+        import modal
+
+        if box_id:
+            handle = modal.Sandbox.from_id(box_id)
+        elif identity["name"]:
+            # An empty lookup never authorizes another create, even after a TTL.
+            handle = modal.Sandbox.from_name(
+                identity["app"], identity["name"], include_terminated=True
+            )
+        else:
+            raise RuntimeError(
+                "Modal persistent create has no name and no confirmed ID; manual reconciliation required"
+            )
+        if handle.get_tags() != identity["tags"]:
+            raise RuntimeError(
+                "Modal allocation ownership tags do not match; no deletion attempted"
+            )
+        allocation.allocated(handle.object_id)
+        handle.terminate(wait=True)
+        return
+    if provider == "e2b" and box_id:
+        import e2b
+
+        api_key = e2b_key()
+        # A 404 cannot prove absence in the original account if credentials changed.
+        info = e2b.Sandbox.get_info(box_id, api_key=api_key, request_timeout=15)
+        if info.metadata != identity["metadata"] or info.sandbox_id != box_id:
+            raise RuntimeError(
+                "E2B allocation ownership metadata does not match; no deletion attempted"
+            )
+        e2b.Sandbox.kill(box_id, api_key=api_key, request_timeout=15)
+        return
+    raise RuntimeError(
+        f"{provider} has no verified automatic recovery contract for this allocation; "
+        "manual reconciliation required, including any in-flight create"
+    )
