@@ -679,7 +679,7 @@ class JournalTests(unittest.TestCase):
                     entry.state["name"],
                 )
                 box.id, box.handle, box.existing, box.resume = None, None, None, False
-                box.allocation, box.modal, box.e2b, box.e2b_api_key = entry, modal, e2b, "fake-key"
+                box.allocation, box.e2b_api_key = entry, "fake-key"
 
                 def interrupted_delete(*args, **kwargs):
                     saved = json.loads(entry.path.read_text())
@@ -693,6 +693,8 @@ class JournalTests(unittest.TestCase):
                 matches = Mock()
                 matches.next_items.return_value = [SimpleNamespace(sandbox_id="discovered-id")]
                 with (
+                    patch.object(box, "modal", modal, create=True),
+                    patch.object(box, "e2b", e2b, create=True),
                     patch.object(modal.Sandbox, "from_name", return_value=handle),
                     patch.object(e2b.Sandbox, "list", return_value=matches),
                     patch.object(e2b.Sandbox, "kill", side_effect=interrupted_delete),
