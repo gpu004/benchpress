@@ -40,7 +40,7 @@ Cleanup deletes only `/tmp/benchpress-verify-*` scratch. Evidence under `artifac
 .cursor/skills/verify-benchpress/helpers/doctor.sh
 ```
 
-Read-only checks: uv `0.13.7`, Python `3.15.2` via uv, imports, pilot fixtures, CLI help listing `{smoke,prepare,run,report,reconcile}`. Run doctor first whenever anything looks off. Never drive a shared live results directory (`results/`) for verification; always use the scratch dir from launch.
+Read-only checks: uv `0.13.7`, Python `3.15.2` via uv, imports, pilot fixtures, CLI help listing `{smoke,prepare,run,report,resolve-cleanup,reconcile}`. Run doctor first whenever anything looks off. Never drive a shared live results directory (`results/`) for verification; always use the scratch dir from launch.
 
 ## Drive
 
