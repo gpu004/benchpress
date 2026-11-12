@@ -10,7 +10,8 @@ PROOF="$EVIDENCE/unit-and-property-tests"
 mkdir -p "$PROOF"
 
 set +e
-uv run --locked --group dev python -m unittest test_benchpress -v \
+uv run --locked --group dev python -m unittest \
+  test_benchpress test_providers test_allocation test_allocation_model test_cleanup -v \
   >"$PROOF/unittest.stdout.txt" 2>"$PROOF/unittest.stderr.txt"
 unit_status=$?
 set -e

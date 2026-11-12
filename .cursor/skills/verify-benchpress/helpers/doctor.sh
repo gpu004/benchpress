@@ -35,7 +35,7 @@ ok "benchpress modules import"
 ok "fixtures/pilot present"
 
 help_out="$(uv run --locked python benchpress.py --help)"
-printf '%s\n' "$help_out" | grep -q '{smoke,prepare,run,report,resolve-cleanup}' \
+printf '%s\n' "$help_out" | grep -q '{smoke,prepare,run,report,resolve-cleanup,reconcile}' \
   || fail "benchpress --help missing expected subcommands"
 ok "CLI subcommands visible"
 

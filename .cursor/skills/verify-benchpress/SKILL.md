@@ -40,7 +40,7 @@ Cleanup deletes only `/tmp/benchpress-verify-*` scratch. Evidence under `artifac
 .cursor/skills/verify-benchpress/helpers/doctor.sh
 ```
 
-Read-only checks: uv `0.13.7`, Python `3.15.2` via uv, imports, pilot fixtures, CLI help listing `{smoke,prepare,run,report}`. Run doctor first whenever anything looks off. Never drive a shared live results directory (`results/`) for verification; always use the scratch dir from launch.
+Read-only checks: uv `0.13.7`, Python `3.15.2` via uv, imports, pilot fixtures, CLI help listing `{smoke,prepare,run,report,resolve-cleanup,reconcile}`. Run doctor first whenever anything looks off. Never drive a shared live results directory (`results/`) for verification; always use the scratch dir from launch.
 
 ## Drive
 
@@ -61,7 +61,7 @@ cp fixtures/pilot/attempts.jsonl fixtures/pilot/experiment.json \
   "$BENCHPRESS_VERIFY_SCRATCH/report-fixture/"
 uv run --locked python benchpress.py report \
   "$BENCHPRESS_VERIFY_SCRATCH/report-fixture"
-uv run --locked --group dev python -m unittest test_benchpress -v
+uv run --locked --group dev python -m unittest test_benchpress test_providers test_allocation test_allocation_model -v
 uv run --locked --group dev python test_properties.py
 ```
 

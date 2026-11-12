@@ -266,7 +266,16 @@ class CleanupRestartTests(unittest.TestCase):
                 scenarios.resolve_cleanup(
                     self.out, scenarios.cleanup_attempt_id(row), **(kwargs | change)
                 )
-        other = row | {"name": "another-creation", "box_id": "another-box"}
+        other = {
+            "block": 99,
+            "workload": "token",
+            "provider": "modal",
+            "scenario": "standard",
+            "name": "another-creation",
+            "box_id": "another-box",
+            "cold": {"status": "ok"},
+            "cleanup": "creation_unconfirmed",
+        }
         with self.assertRaises(ValueError):
             scenarios.resolve_cleanup(self.out, scenarios.cleanup_attempt_id(other), **kwargs)
         self.assert_blocked()

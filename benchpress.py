@@ -9,6 +9,7 @@ import uuid
 from datetime import date
 from pathlib import Path
 
+from allocation import RecoveryBlocked, reconcile_manual
 from constants import (
     DEADLINE_MS,
     EXEC_PROBE_RUNS,
@@ -96,6 +97,14 @@ def main():
         "--evidence", required=True, help="Evidence of ownership and terminal state"
     )
     resolve.add_argument("--confirmed-outcome", choices=("removed", "absent"), required=True)
+    reconcile = sub.add_parser(
+        "reconcile", help="Record evidence that an allocation and its create are terminal"
+    )
+    reconcile.add_argument("--out", type=Path, required=True)
+    reconcile.add_argument("--allocation", required=True)
+    reconcile.add_argument("--confirm-terminal", action="store_true", required=True)
+    reconcile.add_argument("--actor", required=True)
+    reconcile.add_argument("--evidence", required=True)
     args = parser.parse_args()
     try:
         if args.action == "resolve-cleanup":
@@ -110,7 +119,9 @@ def main():
             print(json.dumps(receipt, indent=2))
             return 0
         config = settings(args.config)
-        if args.action == "report":
+        if args.action == "reconcile":
+            reconcile_manual(args.out, args.allocation, actor=args.actor, evidence=args.evidence)
+        elif args.action == "report":
             report(args.path)
         elif args.action == "smoke":
             if args.existing and args.provider != "namespace":
@@ -151,7 +162,7 @@ def main():
             elif args.concurrency is not None:
                 raise ValueError("--concurrency is only valid with --mode burst")
             run_series(args, config)
-    except (ValueError, OSError, RuntimeError) as error:
+    except (ValueError, OSError, RuntimeError, RecoveryBlocked) as error:
         print(error_text(error), file=sys.stderr)
         return 1
     return 0
