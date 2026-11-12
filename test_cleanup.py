@@ -8,12 +8,14 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from functools import partial
+from itertools import chain, repeat
 from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import allocation
 import lifecycle
 import scenarios
 
@@ -28,7 +30,7 @@ class FakeSandbox:
 
     def launch(self, timeout):
         with self.mutex:
-            allocations = scenarios.read_rows(self.root / "cloud.jsonl")
+            allocations = allocation.read_rows(self.root / "cloud.jsonl")
             self.number = len(allocations) + 1
             self.remote_id = f"box-{self.number}"
             previous = sorted(path.name for path in self.root.glob("box-*"))
@@ -134,10 +136,10 @@ class CleanupRestartTests(unittest.TestCase):
         )
 
     def allocations(self):
-        return scenarios.read_rows(self.root / "cloud.jsonl")
+        return allocation.read_rows(self.root / "cloud.jsonl")
 
     def rows(self):
-        return scenarios.read_rows(self.out / "attempts.jsonl")
+        return allocation.read_rows(self.out / "attempts.jsonl")
 
     def fail_first(self, fault="failed"):
         result = self.run_worker(fault)
@@ -157,7 +159,7 @@ class CleanupRestartTests(unittest.TestCase):
             "--out",
             str(self.out),
             "--attempt",
-            scenarios.cleanup_attempt_id(row),
+            allocation.cleanup_attempt_id(row),
             "--resolved-by",
             "test-operator",
             "--allocation-scope",
@@ -176,7 +178,7 @@ class CleanupRestartTests(unittest.TestCase):
         return result
 
     def test_saved_warnings_block_repeated_child_process_restarts(self):
-        for fault in scenarios.CLEANUP_WARNINGS:
+        for fault in allocation.CLEANUP_WARNINGS:
             with self.subTest(fault=fault):
                 # Each fault has its own experiment and persistent fake cloud.
                 with tempfile.TemporaryDirectory() as tmp:
@@ -188,7 +190,7 @@ class CleanupRestartTests(unittest.TestCase):
                     for _ in range(2):
                         result = self.assert_blocked()
                         for value in (
-                            scenarios.cleanup_attempt_id(row),
+                            allocation.cleanup_attempt_id(row),
                             row["provider"],
                             row["name"],
                             "resolve-cleanup",
@@ -217,7 +219,7 @@ class CleanupRestartTests(unittest.TestCase):
         self.assert_blocked()
 
     def test_exact_manual_resolution_allows_next_attempt_without_rewriting_history(self):
-        for fault in scenarios.CLEANUP_WARNINGS:
+        for fault in allocation.CLEANUP_WARNINGS:
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
                 self.root = Path(tmp)
                 self.out = self.root / "experiment"
@@ -232,7 +234,12 @@ class CleanupRestartTests(unittest.TestCase):
                 result = subprocess.run(self.resolve_argv(row), capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 receipt = json.loads(result.stdout)
-                self.assertEqual(receipt["allocation"], scenarios.allocation(row))
+                self.assertEqual(receipt["schema"], 2)
+                self.assertEqual(receipt["subject"]["allocation_id"], row["allocation_id"])
+                self.assertEqual(receipt["allocation"], allocation.resource_identity(row))
+                receipt_path = self.out / "cleanup-resolutions" / f"{row['allocation_id']}.json"
+                self.assertEqual(json.loads(receipt_path.read_text()), receipt)
+                self.assertEqual(list(receipt_path.parent.iterdir()), [receipt_path])
                 self.assertEqual(receipt["resolved_by"], "test-operator")
                 self.assertTrue(datetime.fromisoformat(receipt["resolved_at"]).tzinfo)
                 self.assertEqual((self.out / "attempts.jsonl").read_bytes(), before)
@@ -247,6 +254,98 @@ class CleanupRestartTests(unittest.TestCase):
                 self.assertEqual(len(self.rows()), 2)
                 self.assertEqual(self.run_worker().returncode, 0)
                 self.assertEqual(len(self.allocations()), 2)
+
+    def test_reconcile_and_resolve_cleanup_share_receipt_and_preserve_measurement(self):
+        row = self.fail_first()
+        before = (self.out / "attempts.jsonl").read_bytes()
+        (self.root / "box-1").unlink()
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(Path(scenarios.ROOT) / "benchpress.py"),
+                "reconcile",
+                "--out",
+                str(self.out),
+                "--allocation",
+                row["allocation_id"],
+                "--confirm-terminal",
+                "--actor",
+                "test-operator",
+                "--evidence",
+                "Matched exact creation name and removed local box-1",
+                "--confirmed-outcome",
+                "removed",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt["schema"], 2)
+        self.assertEqual(receipt["subject"]["allocation_id"], row["allocation_id"])
+        self.assertEqual(receipt["subject"]["experiment_id"], row["experiment_id"])
+        self.assertEqual(receipt["subject"]["generation"], 1)
+        self.assertEqual(receipt["attempt_id"], allocation.cleanup_attempt_id(row))
+        self.assertEqual(receipt["allocation"], allocation.resource_identity(row))
+        self.assertEqual(receipt["confirmed_outcome"], "removed")
+        self.assertEqual(receipt["resolved_by"], "test-operator")
+        self.assertTrue(datetime.fromisoformat(receipt["resolved_at"]).tzinfo)
+        receipt_path = self.out / "cleanup-resolutions" / f"{row['allocation_id']}.json"
+        receipt_bytes = receipt_path.read_bytes()
+        self.assertEqual(json.loads(receipt_bytes), receipt)
+        self.assertEqual(list(receipt_path.parent.iterdir()), [receipt_path])
+        self.assertTrue(allocation.cleanup_resolved(row, self.out))
+        self.assertEqual((self.out / "attempts.jsonl").read_bytes(), before)
+
+        result = subprocess.run(self.resolve_argv(row), capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), receipt)
+        self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+        self.assertEqual(list(receipt_path.parent.iterdir()), [receipt_path])
+        self.assertEqual((self.out / "attempts.jsonl").read_bytes(), before)
+
+        result = self.run_worker()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.rows()[0], row)
+        self.assertEqual(len(self.rows()), 2)
+        self.assertTrue((self.out / "attempts.jsonl").read_bytes().startswith(before))
+        after = (self.out / "attempts.jsonl").read_bytes()
+        result = self.run_worker()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.out / "attempts.jsonl").read_bytes(), after)
+        self.assertEqual(len(self.allocations()), 2)
+        self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+        self.assertEqual(list(receipt_path.parent.iterdir()), [receipt_path])
+
+    def test_legacy_resolution_uses_full_attempt_hash_receipt(self):
+        self.out.mkdir()
+        row = {
+            "block": 0,
+            "workload": "token",
+            "provider": "modal",
+            "scenario": "standard",
+            "name": "legacy-creation",
+            "box_id": "legacy-box",
+            "cold": {"status": "ok"},
+            "cleanup": "failed",
+        }
+        with (self.out / "attempts.jsonl").open("w") as stream:
+            scenarios.write_attempt(stream, row)
+        before = (self.out / "attempts.jsonl").read_bytes()
+        result = subprocess.run(self.resolve_argv(row), capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads(result.stdout)
+        attempt_id = allocation.cleanup_attempt_id(row)
+        self.assertEqual(receipt["schema"], 2)
+        self.assertEqual(receipt["subject"], {"attempt_id": attempt_id})
+        self.assertEqual(receipt["attempt_id"], attempt_id)
+        self.assertEqual(receipt["allocation"], allocation.resource_identity(row))
+        receipt_path = self.out / "cleanup-resolutions" / f"{attempt_id}.json"
+        self.assertEqual(json.loads(receipt_path.read_text()), receipt)
+        self.assertEqual(list(receipt_path.parent.iterdir()), [receipt_path])
+        self.assertTrue(allocation.cleanup_resolved(row, self.out))
+        self.assertEqual((self.out / "attempts.jsonl").read_bytes(), before)
 
     def test_resolution_is_exact_and_uncertain_outcomes_stay_blocked(self):
         row = self.fail_first("creation_unconfirmed")
@@ -263,8 +362,8 @@ class CleanupRestartTests(unittest.TestCase):
             {"allocation_scope": ""},
         ):
             with self.subTest(change=change), self.assertRaises(ValueError):
-                scenarios.resolve_cleanup(
-                    self.out, scenarios.cleanup_attempt_id(row), **(kwargs | change)
+                allocation.resolve_cleanup(
+                    self.out, allocation.cleanup_attempt_id(row), **(kwargs | change)
                 )
         other = {
             "block": 99,
@@ -277,17 +376,15 @@ class CleanupRestartTests(unittest.TestCase):
             "cleanup": "creation_unconfirmed",
         }
         with self.assertRaises(ValueError):
-            scenarios.resolve_cleanup(self.out, scenarios.cleanup_attempt_id(other), **kwargs)
+            allocation.resolve_cleanup(self.out, allocation.cleanup_attempt_id(other), **kwargs)
         self.assert_blocked()
-        scenarios.resolve_cleanup(self.out, scenarios.cleanup_attempt_id(row), **kwargs)
+        allocation.resolve_cleanup(self.out, allocation.cleanup_attempt_id(row), **kwargs)
         # A receipt for the first allocation cannot resolve a different attempt, even with its key.
         with (self.out / "attempts.jsonl").open("a") as stream:
             scenarios.write_attempt(stream, other)
         self.assert_blocked()
-        receipt_path = (
-            self.out / "cleanup-resolutions" / f"{scenarios.cleanup_attempt_id(row)}.json"
-        )
-        forged_path = receipt_path.with_name(f"{scenarios.cleanup_attempt_id(other)}.json")
+        receipt_path = self.out / "cleanup-resolutions" / f"{row['allocation_id']}.json"
+        forged_path = receipt_path.with_name(f"{allocation.cleanup_attempt_id(other)}.json")
         forged_path.write_bytes(receipt_path.read_bytes())
         self.assert_blocked()
 
@@ -299,18 +396,49 @@ class CleanupRestartTests(unittest.TestCase):
             evidence="terminal deletion receipt",
             confirmed_outcome="removed",
         )
-        # Parent-directory fsync, receipt fsync, publication, and final directory fsync.
-        for target, side_effect in (
-            ("scenarios.os.fsync", OSError("parent fsync failed")),
-            ("scenarios.os.fsync", [None, OSError("receipt fsync failed")]),
-            ("scenarios.os.replace", OSError("rename failed")),
-            ("scenarios.os.fsync", [None, None, OSError("directory fsync failed")]),
+        directory = self.out / "cleanup-resolutions"
+        before = (self.out / "attempts.jsonl").read_bytes()
+        # Every publication syncs the parent, even when an earlier failure left the directory.
+        for target, failures, message in (
+            (
+                "allocation.os.fsync",
+                [OSError("initial directory fsync failed")],
+                "initial directory fsync failed",
+            ),
+            (
+                "allocation.os.fsync",
+                [None, OSError("receipt fsync failed")],
+                "receipt fsync failed",
+            ),
+            ("allocation.os.replace", [OSError("rename failed")], "rename failed"),
+            (
+                "allocation.os.fsync",
+                [None, None, OSError("final directory fsync failed")],
+                "final directory fsync failed",
+            ),
+            (
+                "allocation.os.fsync",
+                [
+                    None,
+                    None,
+                    OSError("final directory fsync failed"),
+                    OSError("rollback fsync failed"),
+                ],
+                "rollback fsync failed",
+            ),
         ):
-            with self.subTest(target=target, failure=str(side_effect)):
-                with patch(target, side_effect=side_effect), self.assertRaises(OSError):
-                    scenarios.resolve_cleanup(self.out, scenarios.cleanup_attempt_id(row), **kwargs)
-                self.assertFalse(scenarios.cleanup_resolved(row, self.out))
-                self.assertEqual(list((self.out / "cleanup-resolutions").iterdir()), [])
+            with self.subTest(failure=message):
+                # Rollback may sync again; never replace the intended failure with StopIteration.
+                with (
+                    patch(target, side_effect=chain(failures, repeat(None))),
+                    self.assertRaisesRegex(OSError, message),
+                ):
+                    allocation.resolve_cleanup(
+                        self.out, allocation.cleanup_attempt_id(row), **kwargs
+                    )
+                self.assertFalse(allocation.cleanup_resolved(row, self.out))
+                self.assertEqual(list(directory.iterdir()), [])
+                self.assertEqual((self.out / "attempts.jsonl").read_bytes(), before)
                 self.assert_blocked()
 
     def test_run_and_resolution_share_experiment_lock(self):
@@ -321,7 +449,7 @@ class CleanupRestartTests(unittest.TestCase):
             self.assertEqual(result.returncode, 23)
             resolution = subprocess.run(self.resolve_argv(row), capture_output=True, text=True)
             self.assertEqual(resolution.returncode, 1, resolution.stderr)
-        self.assertFalse(scenarios.cleanup_resolved(row, self.out))
+        self.assertFalse(allocation.cleanup_resolved(row, self.out))
         self.assert_blocked()
 
     def test_healthy_saved_attempts_still_skip(self):
@@ -346,7 +474,7 @@ class CleanupRestartTests(unittest.TestCase):
             scenarios.run_series(args, config)
         row = self.rows()[0]
         self.assertEqual(row["cold"]["status"], "setup_error")
-        self.assertFalse(scenarios.cleanup_warning(row))
+        self.assertFalse(allocation.cleanup_warning(row))
         self.assertEqual(self.run_worker().returncode, 0)
         self.assertEqual(len(self.allocations()), 1)
 
@@ -359,7 +487,7 @@ class CleanupRestartTests(unittest.TestCase):
         self.assertEqual(row["cleanup"], "not_run")
         self.assertEqual(self.run_worker().returncode, 0)
         self.assertEqual(self.allocations(), [])
-        scenarios.require_cleanup_resolved([row | {"cleanup": "existing_box_kept"}], self.out)
+        allocation.require_cleanup_resolved([row | {"cleanup": "existing_box_kept"}], self.out)
 
     def test_burst_saves_inflight_results_and_stops_before_next_provider(self):
         self.options.update(mode="burst")

@@ -1,8 +1,11 @@
 """Durable allocation state. Callers hold the experiment lock, including recovery."""
 
+import fcntl
+import hashlib
 import json
 import os
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from tempfile import NamedTemporaryFile
 
@@ -11,6 +14,7 @@ from providers import PROVIDERS, allocation_identity, recover_allocation
 
 PHASES = ("create_pending", "allocated", "cleanup_confirmed", "result_committed")
 KEY_FIELDS = ("block", "workload", "provider", "scenario")
+CLEANUP_WARNINGS = ("failed", "creation_unconfirmed")
 
 
 def timestamp():
@@ -58,6 +62,150 @@ def attempt_key(row):
 
 class RecoveryBlocked(RuntimeError):
     pass
+
+
+@contextmanager
+def experiment_lock(out):
+    with (out / ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+def read_rows(path):
+    if not path.exists():
+        return []
+    try:
+        data = path.read_text()
+        if data and not data.endswith("\n"):
+            raise ValueError("unterminated trailing row")
+        rows = [json.loads(line) for line in data.splitlines()]
+        if any(not isinstance(row, dict) for row in rows):
+            raise ValueError("result row is not an object")
+        return rows
+    except (ValueError, UnicodeError) as error:
+        raise RecoveryBlocked(
+            f"Invalid results {path}: {error}; allocation recovery ran first; scheduling blocked. Preserve the file and journal for reconciliation"
+        ) from error
+
+
+def cleanup_warning(row):
+    return row.get("cleanup") in CLEANUP_WARNINGS
+
+
+def cleanup_attempt_id(row):
+    """Bind legacy evidence to the complete, unchanged measurement."""
+    return hashlib.sha256(json.dumps(row, sort_keys=True, allow_nan=False).encode()).hexdigest()
+
+
+def resource_identity(row):
+    return {key: row.get(key) for key in ("provider", "name", "box_id")}
+
+
+def cleanup_subject(row=None, entry=None):
+    if entry is None:
+        return {"attempt_id": cleanup_attempt_id(row)}
+    return {
+        key: entry.state[key]
+        for key in (
+            "experiment_id",
+            "allocation_id",
+            "generation",
+            "attempt_key",
+            "name",
+            "provider_scope",
+            "provider_identity",
+            "created_at",
+        )
+    }
+
+
+def cleanup_receipt(out, *, row=None, entry=None):
+    """Read one exact terminal attestation, including historical full-row receipts."""
+    subject = cleanup_subject(row, entry)
+    identity = resource_identity(
+        {**entry.state, "provider": entry.state["attempt_key"]["provider"]}
+        if entry is not None
+        else row
+    )
+    key = subject.get("allocation_id", subject.get("attempt_id"))
+    paths = [out / "cleanup-resolutions" / f"{key}.json"]
+    if row is not None and entry is not None:
+        paths.append(out / "cleanup-resolutions" / f"{cleanup_attempt_id(row)}.json")
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            receipt = json.loads(path.read_text())
+            if not isinstance(receipt, dict):
+                continue
+            common = receipt.get("confirmed_outcome") in ("removed", "absent", "terminal") and all(
+                isinstance(receipt.get(field), str) and receipt[field].strip()
+                for field in ("resolved_by", "resolved_at", "allocation_scope", "evidence")
+            )
+            if not common:
+                continue
+            resolved_at = datetime.fromisoformat(receipt["resolved_at"])
+            if resolved_at.tzinfo is None:
+                continue
+            if receipt.get("schema") == 2:
+                if receipt.get("subject") != subject or receipt.get("allocation") != identity:
+                    continue
+            elif receipt.get("schema") == 1 and row is not None:
+                if (
+                    receipt.get("attempt_id") != cleanup_attempt_id(row)
+                    or receipt.get("allocation") != resource_identity(row)
+                    or receipt.get("confirmed_outcome") not in ("removed", "absent")
+                ):
+                    continue
+            else:
+                continue
+            return receipt
+        except ValueError, TypeError:
+            continue
+    return None
+
+
+def cleanup_resolved(row, out, journal=None):
+    entry = None
+    if allocation_id := row.get("allocation_id"):
+        if journal is None:
+            manifest = json.loads((out / "experiment.json").read_text())
+            journal = AllocationJournal(out, manifest)
+        entry = next(
+            (item for item in journal.entries if item.state["allocation_id"] == allocation_id), None
+        )
+        if entry is None:
+            raise RecoveryBlocked(f"Missing journal for result {allocation_id}; scheduling blocked")
+        journal.validate_result(entry.state, row)
+        if row != entry.state.get("result"):
+            raise entry.blocked("saved result differs from journal")
+        if entry.state["phase"] in (
+            "cleanup_confirmed",
+            "result_committed",
+        ) and not entry.state.get("cleanup_receipt"):
+            return True
+    return cleanup_receipt(out, row=row, entry=entry) is not None
+
+
+def require_cleanup_resolved(rows, out, journal=None):
+    unresolved = [
+        row for row in rows if cleanup_warning(row) and not cleanup_resolved(row, out, journal)
+    ]
+    if unresolved:
+        details = "\n".join(
+            f"attempt {cleanup_attempt_id(row)}: block={row.get('block')}, "
+            f"workload={row.get('workload')}, scenario={row.get('scenario', 'standard')}, "
+            f"allocation={json.dumps(resource_identity(row))}, cleanup={row['cleanup']}"
+            for row in unresolved
+        )
+        raise RecoveryBlocked(
+            f"Unresolved cleanup in {out / 'attempts.jsonl'}:\n{details}\n"
+            "Verify ownership and a terminal outcome for this exact allocation and any "
+            "in-flight create, then record the evidence with benchpress.py resolve-cleanup "
+            "--out DIR --attempt ID --resolved-by OPERATOR --allocation-scope SCOPE "
+            "--evidence EVIDENCE --confirmed-outcome removed|absent. "
+            "Uncertain recovery must remain blocked."
+        )
 
 
 class Allocation:
@@ -208,10 +356,50 @@ class AllocationJournal:
         self.entries.append(entry)
         return entry
 
+    def apply_cleanup_receipt(self, entry):
+        terminal = entry.state["phase"] in ("cleanup_confirmed", "result_committed")
+        if terminal and not entry.state.get("cleanup_receipt"):
+            return
+        receipt = cleanup_receipt(self.path.parent, row=entry.state.get("result"), entry=entry)
+        if terminal:
+            if receipt is None:
+                raise entry.blocked("missing or invalid cleanup receipt")
+            return
+        if receipt is not None:
+            # A previous process may have stopped between receipt rename and directory fsync.
+            sync_directory(self.path.parent)
+            sync_directory(self.path.parent / "cleanup-resolutions")
+            key = (
+                receipt["subject"]["allocation_id"]
+                if receipt["schema"] == 2
+                else receipt["attempt_id"]
+            )
+            entry.cleaned(cleanup_receipt=f"cleanup-resolutions/{key}.json")
+
     def recover(self):
         """Finish cleanup before reading possibly torn results or building any schedule."""
+        known_ids = {entry.state["allocation_id"] for entry in self.entries}
+        for path in sorted((self.path.parent / "cleanup-resolutions").glob("*.json")):
+            try:
+                receipt = json.loads(path.read_text())
+            except (ValueError, UnicodeError) as error:
+                raise RecoveryBlocked(
+                    f"Malformed cleanup receipt {path}; scheduling blocked"
+                ) from error
+            if isinstance(receipt, dict) and receipt.get("schema") == 2:
+                subject = receipt.get("subject")
+                if (
+                    isinstance(subject, dict)
+                    and subject.get("allocation_id") is not None
+                    and subject["allocation_id"] not in known_ids
+                ):
+                    raise RecoveryBlocked(
+                        f"Missing journal for cleanup receipt {path}; scheduling blocked. "
+                        "Preserve the receipt and restore the allocation journal before retrying"
+                    )
         blocked = []
         for entry in self.entries:
+            self.apply_cleanup_receipt(entry)
             if entry.state["phase"] in ("cleanup_confirmed", "result_committed"):
                 continue
             result = entry.state.get("result")
@@ -276,10 +464,9 @@ class AllocationJournal:
                     raise entry.blocked("saved result differs from journal")
                 if state["phase"] == "result_committed":
                     continue
-                # Never jump to result_committed without cleanup_confirmed_at. A crash after
-                # resolve-cleanup persists its receipt but before journal.cleaned() must heal here.
-                if state["phase"] != "cleanup_confirmed":
-                    entry.cleaned(recovered_at=timestamp())
+                self.apply_cleanup_receipt(entry)
+                if entry.state["phase"] != "cleanup_confirmed":
+                    raise entry.blocked("saved result does not prove terminal cleanup")
                 # Sync a complete row that survived a crash before the writer's fsync.
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -290,6 +477,10 @@ class AllocationJournal:
                 raise entry.blocked("committed result is missing from attempts.jsonl")
             if attempt_key(state["attempt_key"]) in by_key:
                 raise entry.blocked("another result uses this scheduled key")
+            if state.get("result") is None:
+                self.apply_cleanup_receipt(entry)
+                if entry.state["phase"] != "cleanup_confirmed":
+                    raise entry.blocked("interrupted allocation has no terminal cleanup evidence")
             row = state.get("result") or {
                 **state["attempt_key"],
                 "experiment_id": self.experiment_id,
@@ -308,28 +499,128 @@ class AllocationJournal:
                 entry.save(interrupted_at=timestamp())
             self.commit(stream, row, write_attempt)
             rows.append(row)
-        # Legacy cleanup warnings (no allocation_id) are gated by require_cleanup_resolved /
-        # resolve-cleanup receipts in scenarios.py. Do not hard-reject resolved receipts here.
         return rows
 
 
-def reconcile_manual(root, allocation_id, *, actor, evidence):
-    """Record an operator's terminal-outcome evidence without rewriting measurements."""
-    import fcntl
+def record_cleanup(
+    root,
+    *,
+    attempt_id=None,
+    allocation_id=None,
+    resolved_by,
+    evidence,
+    allocation_scope=None,
+    confirmed_outcome="terminal",
+):
+    """Both CLI selectors publish the same receipt before updating resource tracking."""
+    if (attempt_id is None) == (allocation_id is None):
+        raise ValueError("Select exactly one attempt or allocation")
+    if confirmed_outcome not in ("removed", "absent", "terminal"):
+        raise ValueError("Cleanup requires a confirmed terminal outcome")
+    if not all(isinstance(value, str) and value.strip() for value in (resolved_by, evidence)):
+        raise ValueError("Supply the operator and terminal provider evidence")
+    if allocation_scope is not None and (
+        not isinstance(allocation_scope, str) or not allocation_scope.strip()
+    ):
+        raise ValueError("Supply the exact allocation scope")
+    with experiment_lock(root):
+        row = None
+        if attempt_id is not None:
+            matches = [
+                row
+                for row in read_rows(root / "attempts.jsonl")
+                if cleanup_attempt_id(row) == attempt_id and cleanup_warning(row)
+            ]
+            if len(matches) != 1:
+                raise ValueError("Select exactly one saved cleanup warning by its full attempt ID")
+            row = matches[0]
+            allocation_id = row.get("allocation_id")
+        journal = entry = None
+        if allocation_id is not None:
+            manifest = json.loads((root / "experiment.json").read_text())
+            journal = AllocationJournal(root, manifest)
+            entry = next(
+                (item for item in journal.entries if item.state["allocation_id"] == allocation_id),
+                None,
+            )
+            if entry is None:
+                raise ValueError("Unknown allocation ID")
+            if row is not None:
+                journal.validate_result(entry.state, row)
+                if row != entry.state.get("result"):
+                    raise entry.blocked("saved result differs from journal")
+            else:
+                row = entry.state.get("result")
+        if allocation_scope is None:
+            if entry is None:
+                raise ValueError("Supply the exact allocation scope for a legacy attempt")
+            allocation_scope = json.dumps(
+                {
+                    "provider": entry.state["attempt_key"]["provider"],
+                    "name": entry.state["name"],
+                    "scope": entry.state["provider_scope"],
+                },
+                sort_keys=True,
+            )
+        existing = cleanup_receipt(root, row=row, entry=entry)
+        if existing is not None:
+            if entry is not None:
+                entry.journal.apply_cleanup_receipt(entry)
+            return existing
+        subject = cleanup_subject(row, entry)
+        receipt = {
+            "schema": 2,
+            "subject": subject,
+            "attempt_id": cleanup_attempt_id(row) if row is not None else None,
+            "allocation": resource_identity(
+                {**entry.state, "provider": entry.state["attempt_key"]["provider"]}
+                if entry is not None
+                else row
+            ),
+            "confirmed_outcome": confirmed_outcome,
+            "resolved_by": resolved_by.strip(),
+            "resolved_at": timestamp(),
+            "allocation_scope": allocation_scope.strip(),
+            "evidence": evidence.strip(),
+        }
+        directory = root / "cleanup-resolutions"
+        directory.mkdir(exist_ok=True)
+        sync_directory(root)
+        key = subject.get("allocation_id", subject.get("attempt_id"))
+        path = directory / f"{key}.json"
+        if path.exists():
+            raise RecoveryBlocked(f"Invalid or conflicting cleanup receipt {path}; preserve it")
+        try:
+            durable_json(path, receipt)
+        except BaseException:
+            if path.exists():
+                path.unlink()
+                sync_directory(directory)
+            raise
+        if entry is not None:
+            entry.journal.apply_cleanup_receipt(entry)
+        return receipt
 
-    if not actor.strip() or not evidence.strip():
-        raise ValueError("Manual reconciliation needs an actor and provider evidence")
-    with (root / ".lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        manifest = json.loads((root / "experiment.json").read_text())
-        journal = AllocationJournal(root, manifest)
-        entry = next(
-            (item for item in journal.entries if item.state["allocation_id"] == allocation_id), None
-        )
-        if entry is None:
-            raise ValueError("Unknown allocation ID")
-        if entry.state["phase"] in ("cleanup_confirmed", "result_committed"):
-            return
-        entry.cleaned(
-            manual_resolution={"actor": actor, "evidence": evidence, "recorded_at": timestamp()}
-        )
+
+def resolve_cleanup(out, attempt_id, *, resolved_by, allocation_scope, evidence, confirmed_outcome):
+    return record_cleanup(
+        out,
+        attempt_id=attempt_id,
+        resolved_by=resolved_by,
+        allocation_scope=allocation_scope,
+        evidence=evidence,
+        confirmed_outcome=confirmed_outcome,
+    )
+
+
+def reconcile_manual(
+    root, allocation_id, *, actor, evidence, allocation_scope=None, confirmed_outcome="terminal"
+):
+    return record_cleanup(
+        root,
+        allocation_id=allocation_id,
+        resolved_by=actor,
+        evidence=evidence,
+        allocation_scope=allocation_scope,
+        confirmed_outcome=confirmed_outcome,
+    )

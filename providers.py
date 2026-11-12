@@ -393,7 +393,7 @@ def prepare(provider, settings, name, *, variant="default"):
         # E2B clears /tmp between COPY and RUN layers, so stage under /opt.
         # Copy install-package to its own dest so the directory name is kept
         # (COPY dir dest/ otherwise flattens contents into dest).
-        files = [
+        files: list[str | Path] = [
             "prepare.sh",
             "fixture.mjs",
             "run.mjs",

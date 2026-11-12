@@ -1,0 +1,52 @@
+{
+  "schema": 2,
+  "pilot": true,
+  "start_date": "None",
+  "client_region": null,
+  "providers": [
+    "tesser",
+    "modal",
+    "e2b"
+  ],
+  "workloads": [
+    "one",
+    "ten",
+    "token",
+    "cores",
+    "disk",
+    "net",
+    "install"
+  ],
+  "scenario": "standard",
+  "variant": "default",
+  "deadline_seconds": 120,
+  "client": "0000000000000000000000000000000000000000000000000000000000000000",
+  "node": "26.13.1",
+  "source_sha256": "c313992a3034a7c24fdc02f3b5c7f1ba748f58b52fae9b8d0c3db51b80918749",
+  "seed": 7256,
+  "config": {
+    "tesser": {
+      "size": "standard",
+      "region_label": "US, exact region unreported",
+      "usd_per_hour": 0.08,
+      "price_date": "2026-11-11",
+      "price_source": "https://tesser.sh/pricing",
+      "snapshot": "snapshot_example"
+    },
+    "modal": {
+      "app": "benchpress-sandboxes",
+      "region_label": "automatic placement",
+      "usd_per_hour": 0.23796,
+      "price_date": "2026-11-11",
+      "price_source": "https://modal.com/products/sandboxes#active-resource-sandbox-pricing",
+      "image": "image_example"
+    },
+    "e2b": {
+      "region_label": "account endpoint",
+      "usd_per_hour": 0.1656,
+      "price_date": "2026-11-11",
+      "price_source": "https://e2b.dev/pricing",
+      "template": "template_example"
+    }
+  }
+}

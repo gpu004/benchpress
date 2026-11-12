@@ -15,20 +15,27 @@ Benchpress measures how long a short command takes to return a verified result o
 
 ## Pilot results
 
-On November 11, 2026, artifacts were re-prepared and Tesser, Modal, and E2B each ran three workloads using Node 26.13.1. Each workload ran on a fresh box from a prepared image or snapshot, then again on that same running box. Fresh timings start at the launch request. Running timings start when the client sends the command. Both end when the client verifies the result.
+On November 12, 2026, Tesser, Modal, and E2B each completed all seven workloads using prepared artifacts and Node 26.13.1. All 84 workload commands and 105 overhead pings verified. All 21 boxes were removed, and separate provider-list checks found none of those boxes still listed. Namespace and Boat were not timed.
 
-Tesser ran the timed commands with `tesser ssh` against boxes started with `tesser make --snapshot`, which skips checkout sync for both command runs. The earlier pilot used `tesser exec` and included checkout sync in both timings. Sanitized raw rows for the corrected pilot are in [`fixtures/pilot/`](fixtures/pilot/) (`attempts.jsonl` and `experiment.json`; live box and artifact IDs replaced).
+Each cell below shows **fresh / warm seconds**. Fresh is one observation from the launch request through readiness, execution, and client verification. Warm is the median of three workload commands on that same running box, measured from command submission through verification. These are end-to-end wall times, not guest-compute timings. Tesser uses `tesser ssh` against a box started with `tesser make --snapshot`, without checkout sync in the timed commands.
 
-| Provider | Token, fresh / running | One pass, fresh / running | Ten passes, fresh / running | Verified commands |
-|---|---:|---:|---:|---:|
-| Tesser Standard | 15.230 / 1.252 s | 5.813 / 1.329 s | 7.510 / 2.628 s | 6/6 |
-| Modal Sandbox | 1.259 / 0.329 s | 1.096 / 0.363 s | 3.343 / 2.402 s | 6/6 |
-| E2B | 3.269 / 0.143 s | 2.331 / 0.398 s | 5.417 / 3.041 s | 6/6 |
-| Namespace | — | — | — | Launch rejected |
+| Workload | Tesser Standard | Modal Sandbox | E2B |
+|---|---:|---:|---:|
+| Token command | 5.525 / 0.761 | 1.266 / 0.196 | 2.219 / 0.143 |
+| 32 MiB, one pass | 5.944 / 1.206 | 1.696 / 0.367 | 3.323 / 0.654 |
+| Ten passes | 8.404 / 3.056 | 5.030 / 2.880 | 5.516 / 3.187 |
+| Two-worker CPU parse | 5.481 / 1.180 | 2.822 / 1.229 | 3.076 / 0.677 |
+| 64 MiB write/read | 8.762 / 1.582 | 2.092 / 0.428 | 3.007 / 0.493 |
+| Package download | 5.604 / 0.999 | 1.299 / 0.311 | 2.629 / 0.258 |
+| Local npm install | 5.715 / 0.945 | 1.253 / 0.557 | 3.170 / 0.399 |
 
-Guest compute time on the fresh ten-pass workload was 1.636 s on Tesser, 2.282 s on Modal, and 3.232 s on E2B. Tesser’s token fresh sample spent 13.222 s in the launch call alone; treat that cell as a launch-variance observation, not a typical token latency. All timed pilot boxes were cleaned up. An existing Namespace box still held the account's one-box limit, so Namespace was omitted from the timed pilot after a rejected launch.
+Sanitized raw command timings, the experiment manifest, and cleanup checks are in [`fixtures/pilot-20261112/`](fixtures/pilot-20261112/). Client identity, allocation names, box IDs, artifact IDs, and nonces are replaced. The earlier three-workload pilot remains in [`fixtures/pilot/`](fixtures/pilot/).
 
-Each timing is one observation. The providers ran from the same client in one interleaved pilot, with different machine configurations and placement. The pilot does not establish a typical speedup, CPU oversubscription, or build and test performance. The planned three-day series is pending, and Boat was not timed.
+This run predates the allocation journal and restart-recovery changes in `78c2d53` and `e2838f2`. Its source fingerprint is `c313992a3034a7c24fdc02f3b5c7f1ba748f58b52fae9b8d0c3db51b80918749`, not the current runner's fingerprint. The current runner adds returned-ID persistence to cold wall time. These results do not measure that overhead or verify live crash recovery.
+
+The pilot used an active workstation with an unstated client region, different provider hardware, and different placement. Each fresh cell has one sample, and the three warm commands share one box. No runtime profile established the resource limiter. The run does not establish a repeatable provider ranking, CPU oversubscription, or build and test performance. The planned three-day series is pending.
+
+The generated report still uses the first warm command for its `warm-median` guest-compute column. The wall medians above are calculated directly from the three raw commands and are unaffected.
 
 ## Pricing comparison
 
@@ -46,7 +53,7 @@ USD list rates checked November 11, 2026. The hour columns show compute usage be
 
 Boat's $20 monthly minimum covers either example for both sizes. Tesser Pro includes $20 of usage in its $20 monthly fee. Amp's $20 Megawatt plan lists 45,000 hosted orb minutes. The Modal row uses the Sandbox rate for the reservation we tested. [Boat pricing](https://boat.dev/) · [Tesser pricing](https://tesser.sh/pricing) · [Amp plans](https://ampcode.com/pricing) · [Modal Sandbox billing](https://modal.com/docs/guide/sandbox-resources)
 
-In the one-pass pilot, estimated compute cost per verified result was **$0.000071 for E2B**, **$0.000114 for Tesser**, and **$0.001051 for Modal**. Those pilot estimates used the full client-observed lifecycle through cleanup, divided by the two verified commands. Modal’s lifecycle was about 32 s per box in that run, mostly after the verified commands, so the figure is teardown-dominated. Newer reports separate billable time through the last measured command from harness metadata and cleanup wait. These are list-rate estimates, not invoices.
+Runtime-derived cost estimates use the configured list rates, not invoices. Reports separate estimated billable time through the last measured command from the full lifecycle, which also includes metadata collection and cleanup wait. The rates above were checked on November 11, 2026; the November 12 rerun did not recheck pricing.
 
 ## Set up and smoke-test
 
@@ -114,7 +121,7 @@ uv run --locked python benchpress.py resolve-cleanup --out results/main \
   --evidence 'ownership evidence and provider deletion/terminal-state receipt'
 ```
 
-Use `--confirmed-outcome absent` only for a confirmed terminal absence. A lost creation response, failed lookup, ambiguous match, empty list, or elapsed TTL alone does not establish absence. Keep the experiment blocked until the exact creation is accounted for. This command records an operator attestation; it does not query providers or delete boxes. It requires the full attempt ID and nonempty operator, scope, and evidence fields. Receipts are persisted separately under `cleanup-resolutions/` with the allocation identity and UTC time. Original measurements remain unchanged and recorded attempts remain skipped. Run and resolution commands use the same experiment lock. Burst runs drain and save their already-submitted workers before stopping on a cleanup warning; existing burst outputs still require a new directory. Allocations interrupted before an attempt row was saved are outside this guard, as tracked in [issue #2](https://github.com/gpu004/benchpress/issues/2).
+Use `--confirmed-outcome absent` only for a confirmed terminal absence. A lost creation response, failed lookup, ambiguous match, empty list, or elapsed TTL alone does not establish absence. Keep the experiment blocked until the exact creation is accounted for. This command records an operator attestation; it does not query providers or delete boxes. It requires the full attempt ID and nonempty operator, scope, and evidence fields. Both `resolve-cleanup` and `reconcile` use the same receipt format and writer in `allocation.py`. New receipts live under `cleanup-resolutions/<allocation_id>.json` for journaled resources, or `<attempt_id>.json` for legacy rows. They include the exact resource identity, operator, scope, evidence, outcome, and UTC time. Original measurements remain unchanged and recorded attempts remain skipped. Run and resolution commands use the same experiment lock. Burst runs drain and save their already-submitted workers before stopping on a cleanup warning; existing burst outputs still require a new directory. Allocations interrupted before an attempt row is saved are handled by the allocation journal described in [Interrupted allocations and restart recovery](#interrupted-allocations-and-restart-recovery).
 
 ```sh
 uv run --locked python benchpress.py --config benchpress.local.toml run \
@@ -168,12 +175,25 @@ uv run --locked python benchpress.py reconcile --out results/main \
   --evidence 'provider/account reference, exact allocation, terminal outcome and request evidence'
 ```
 
-This command records the operator, evidence, and timestamp under the same lock.
-It is an operator attestation, not a provider lookup. It does not delete a box or
-rewrite measurement history. A rerun or an expired TTL alone is insufficient
+`reconcile` selects an allocation directly, even before a result exists.
+`resolve-cleanup` selects a saved warning by its full attempt hash. For a journaled
+attempt, either command writes or reuses the same receipt. Both commands print the
+receipt and hold the experiment lock. `reconcile` also accepts `--allocation-scope`
+and `--confirmed-outcome removed|absent|terminal`. Its default `terminal` records
+that the allocation and any in-flight create can no longer become live. Include
+the original provider account in the evidence, especially when no scope is supplied.
+
+The receipt is durable before the journal advances to `cleanup_confirmed`.
+Startup reapplies receipts before contacting providers, so a crash between receipt
+publication and journal update does not require another attestation. The journal
+retains intent, remote identity, box ID, phases, and result tracking. A saved result
+alone never proves cleanup. Existing schema-1 receipts and historical terminal
+journal records remain valid. Legacy rows without a journal use `resolve-cleanup`.
+
+These commands record operator attestations. They do not query providers, delete
+boxes, or rewrite measurements. A rerun or an expired TTL alone is insufficient
 evidence. Do not delete pending records or use another results directory to bypass
-a block. Older cleanup-warning rows without an allocation journal remain blocked
-and require manual inspection; this command cannot resolve those legacy rows.
+a block.
 
 After confirmed cleanup, an interrupted allocation without a durably staged result
 gets exactly one `cold.status="interrupted"` row. It counts as a failed attempt and
