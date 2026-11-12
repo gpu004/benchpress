@@ -15,7 +15,8 @@ mkdir -p "$EXPERIMENT" "$PROOF"
 uv run --locked python - <<'PY' "$EXPERIMENT"
 import json, sys
 from pathlib import Path
-from scenarios import cleanup_attempt_id, write_attempt
+from allocation import cleanup_attempt_id
+from scenarios import write_attempt
 
 out = Path(sys.argv[1])
 row = {
@@ -79,7 +80,8 @@ uv run --locked python - <<'PY' "$PROOF/receipt.json" "$ATTEMPT_ID"
 import json, sys
 receipt = json.loads(open(sys.argv[1]).read())
 attempt_id = sys.argv[2]
-assert receipt["schema"] == 1
+assert receipt["schema"] == 2
+assert receipt["subject"] == {"attempt_id": attempt_id}
 assert receipt["attempt_id"] == attempt_id
 assert receipt["confirmed_outcome"] == "removed"
 assert receipt["allocation"] == {

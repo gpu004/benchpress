@@ -407,11 +407,15 @@ class CrashTests(unittest.TestCase):
             self.assertEqual(self.invoke(root, provider="tesser").returncode, 0)
             rows = scenarios.read_rows(root / "experiment/attempts.jsonl")
             self.assertEqual(rows[0]["cold"]["status"], "interrupted")
-            self.assertEqual(
-                self.entries(root)[0].get("manual_resolution", {}).get("actor")
-                or self.entries(root)[1].get("manual_resolution", {}).get("actor"),
-                "test-operator",
+            reconciled = next(
+                entry
+                for entry in self.entries(root)
+                if entry["allocation_id"] == state["allocation_id"]
             )
+            receipt = json.loads((root / "experiment" / reconciled["cleanup_receipt"]).read_text())
+            self.assertEqual(receipt["schema"], 2)
+            self.assertEqual(receipt["subject"]["allocation_id"], state["allocation_id"])
+            self.assertEqual(receipt["resolved_by"], "test-operator")
             self.assert_safety(root)
 
     def test_interrupted_measurement_is_reported_once_as_censored(self):
@@ -718,25 +722,320 @@ class JournalTests(unittest.TestCase):
                 ]
                 out = Path(tmp)
                 with self.assertRaisesRegex(RuntimeError, "Unresolved cleanup"):
-                    scenarios.require_cleanup_resolved(rows, out, journal)
+                    allocation.require_cleanup_resolved(rows, out, journal)
                 with (out / "attempts.jsonl").open("a") as stream:
                     scenarios.write_attempt(stream, rows[0])
                     journal.reconcile_results(rows, stream, scenarios.write_attempt)
-                scenarios.resolve_cleanup(
+                allocation.resolve_cleanup(
                     out,
-                    scenarios.cleanup_attempt_id(rows[0]),
+                    allocation.cleanup_attempt_id(rows[0]),
                     resolved_by="operator",
                     allocation_scope="legacy fake scope",
                     evidence="terminal evidence",
                     confirmed_outcome="absent",
                 )
-                scenarios.require_cleanup_resolved(rows, out, journal)
+                allocation.require_cleanup_resolved(rows, out, journal)
                 with (out / "attempts.jsonl").open("a") as stream:
                     journal.reconcile_results(rows, stream, scenarios.write_attempt)
                 rows[0]["allocation_id"] = "missing"
                 with (out / "attempts.jsonl").open("a") as stream:
                     with self.assertRaisesRegex(RecoveryBlocked, "Missing journal"):
                         journal.reconcile_results(rows, stream, scenarios.write_attempt)
+
+    def result_row(self, entry, cleanup="failed"):
+        return {
+            **entry.state["attempt_key"],
+            "experiment_id": entry.state["experiment_id"],
+            "allocation_id": entry.state["allocation_id"],
+            "name": entry.state["name"],
+            "box_id": entry.state["box_id"],
+            "cold": {"status": "ok"},
+            "cleanup": cleanup,
+        }
+
+    def test_matching_modern_saved_result_without_receipt_cannot_authorize_cleanup(self):
+        for cleanup in ("failed", "creation_unconfirmed", "removed"):
+            with self.subTest(cleanup=cleanup), tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp)
+                journal = self.journal(tmp)
+                entry = journal.begin("modal", {"app": "fake"}, "standard", "token", 0)
+                entry.allocated("box-1")
+                row = self.result_row(entry, cleanup)
+                entry.save(result=row)
+                with (out / "attempts.jsonl").open("a") as stream:
+                    scenarios.write_attempt(stream, row)
+                original_result = (out / "attempts.jsonl").read_bytes()
+                original_journal = entry.path.read_bytes()
+                self.assertFalse(allocation.cleanup_resolved(row, out, journal))
+                if cleanup != "removed":
+                    with self.assertRaisesRegex(RecoveryBlocked, "Unresolved cleanup"):
+                        allocation.require_cleanup_resolved([row], out, journal)
+                with (out / "attempts.jsonl").open("a") as stream:
+                    with self.assertRaisesRegex(RecoveryBlocked, "terminal cleanup"):
+                        journal.reconcile_results([row], stream, scenarios.write_attempt)
+                self.assertEqual(entry.path.read_bytes(), original_journal)
+                self.assertEqual((out / "attempts.jsonl").read_bytes(), original_result)
+
+    def test_interrupted_result_requires_terminal_cleanup_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            journal = self.journal(tmp)
+            entry = journal.begin("modal", {"app": "fake"}, "standard", "token", 0)
+            before = entry.path.read_bytes()
+            with (out / "attempts.jsonl").open("a") as stream:
+                with self.assertRaisesRegex(RecoveryBlocked, "terminal cleanup evidence"):
+                    journal.reconcile_results([], stream, scenarios.write_attempt)
+            self.assertEqual(entry.path.read_bytes(), before)
+            self.assertEqual(scenarios.read_rows(out / "attempts.jsonl"), [])
+
+    def test_lost_shared_receipt_blocks_even_after_journal_confirmation(self):
+        for committed in (False, True):
+            with self.subTest(committed=committed), tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp)
+                journal = self.journal(tmp)
+                durable_json(out / "experiment.json", {"experiment_id": journal.experiment_id})
+                entry = journal.begin("modal", {"app": "fake"}, "standard", "token", 0)
+                row = self.result_row(entry)
+                entry.save(result=row)
+                with (out / "attempts.jsonl").open("a") as stream:
+                    scenarios.write_attempt(stream, row)
+                allocation.reconcile_manual(
+                    out, entry.state["allocation_id"], actor="operator", evidence="terminal"
+                )
+                restarted = self.journal(tmp)
+                if committed:
+                    with (out / "attempts.jsonl").open("a") as stream:
+                        restarted.reconcile_results([row], stream, scenarios.write_attempt)
+                path = out / "cleanup-resolutions" / f"{entry.state['allocation_id']}.json"
+                path.unlink()
+                with self.assertRaisesRegex(RecoveryBlocked, "missing or invalid cleanup receipt"):
+                    self.journal(tmp).recover()
+                with self.assertRaisesRegex(RecoveryBlocked, "Unresolved cleanup"):
+                    allocation.require_cleanup_resolved([row], out, restarted)
+                self.assertEqual(scenarios.read_rows(out / "attempts.jsonl"), [row])
+
+    def test_shared_receipt_publish_before_journal_update_recovers_without_provider_calls(self):
+        for phase in ("allocated", "create_pending"):
+            for has_result in (True, False):
+                selectors = ("attempt_id", "allocation_id") if has_result else ("allocation_id",)
+                for selector in selectors:
+                    with (
+                        self.subTest(phase=phase, has_result=has_result, selector=selector),
+                        tempfile.TemporaryDirectory() as tmp,
+                    ):
+                        out = Path(tmp)
+                        journal = self.journal(tmp)
+                        durable_json(
+                            out / "experiment.json", {"experiment_id": journal.experiment_id}
+                        )
+                        entry = journal.begin("modal", {"app": "fake"}, "standard", "token", 0)
+                        if phase == "allocated":
+                            entry.allocated("box-1")
+                        rows = []
+                        if has_result:
+                            row = self.result_row(entry, "creation_unconfirmed")
+                            entry.save(result=row)
+                            rows.append(row)
+                            with (out / "attempts.jsonl").open("a") as stream:
+                                scenarios.write_attempt(stream, row)
+                        original = entry.path.read_bytes()
+                        selected_id = (
+                            allocation.cleanup_attempt_id(rows[0])
+                            if selector == "attempt_id"
+                            else entry.state["allocation_id"]
+                        )
+                        with patch.object(
+                            Allocation, "save", side_effect=OSError("crash before journal update")
+                        ):
+                            with self.assertRaisesRegex(OSError, "crash before journal update"):
+                                allocation.record_cleanup(
+                                    out,
+                                    **{selector: selected_id},
+                                    resolved_by="receipt-operator",
+                                    evidence="Provider confirms terminal allocation and create",
+                                )
+                        self.assertEqual(entry.path.read_bytes(), original)
+                        receipt_path = (
+                            out / "cleanup-resolutions" / f"{entry.state['allocation_id']}.json"
+                        )
+                        receipt_bytes = receipt_path.read_bytes()
+                        receipt = json.loads(receipt_bytes)
+                        self.assertEqual(receipt["schema"], 2)
+                        self.assertEqual(receipt["resolved_by"], "receipt-operator")
+                        self.assertEqual(
+                            receipt["subject"]["allocation_id"], entry.state["allocation_id"]
+                        )
+                        self.assertEqual(receipt["allocation"]["box_id"], entry.state["box_id"])
+                        with patch.object(
+                            allocation,
+                            "recover_allocation",
+                            side_effect=AssertionError("receipt must prevent provider calls"),
+                        ) as recover:
+                            restarted = self.journal(tmp)
+                            restarted.recover()
+                            healed = json.loads(entry.path.read_text())
+                            self.assertEqual(healed["phase"], "cleanup_confirmed")
+                            self.assertEqual(
+                                healed["cleanup_receipt"], str(receipt_path.relative_to(out))
+                            )
+                            self.assertEqual(healed["result"], rows[0] if has_result else None)
+                            with (out / "attempts.jsonl").open("a") as stream:
+                                restarted.reconcile_results(rows, stream, scenarios.write_attempt)
+                            saved = scenarios.read_rows(out / "attempts.jsonl")
+                            self.assertEqual(len(saved), 1)
+                            if has_result:
+                                self.assertEqual(saved[0], row)
+                                allocation.require_cleanup_resolved(saved, out, restarted)
+                            else:
+                                self.assertEqual(saved[0]["cold"]["status"], "interrupted")
+                            restarted = self.journal(tmp)
+                            restarted.recover()
+                            with (out / "attempts.jsonl").open("a") as stream:
+                                restarted.reconcile_results(saved, stream, scenarios.write_attempt)
+                            recover.assert_not_called()
+                        self.assertEqual(scenarios.read_rows(out / "attempts.jsonl"), saved)
+                        self.assertEqual(
+                            json.loads(entry.path.read_text())["phase"], "result_committed"
+                        )
+                        self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+
+    def test_shared_receipt_identity_mismatch_cannot_authorize_cleanup(self):
+        mismatches = (
+            ("subject", "experiment_id", "1" * 32),
+            ("subject", "allocation_id", "a" * 32),
+            ("subject", "generation", 2),
+            ("subject", "provider_identity", {}),
+            ("allocation", "provider", "e2b"),
+            ("allocation", "name", "another-allocation"),
+            ("allocation", "box_id", "another-box"),
+        )
+        for section, field, value in mismatches:
+            with self.subTest(section=section, field=field), tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp)
+                journal = self.journal(tmp)
+                durable_json(out / "experiment.json", {"experiment_id": journal.experiment_id})
+                entry = journal.begin("modal", {"app": "fake"}, "standard", "token", 0)
+                entry.allocated("box-1")
+                row = self.result_row(entry)
+                entry.save(result=row)
+                with (out / "attempts.jsonl").open("a") as stream:
+                    scenarios.write_attempt(stream, row)
+                original = entry.path.read_bytes()
+                with patch.object(Allocation, "save", side_effect=OSError("journal unavailable")):
+                    with self.assertRaises(OSError):
+                        allocation.record_cleanup(
+                            out,
+                            allocation_id=entry.state["allocation_id"],
+                            resolved_by="operator",
+                            evidence="terminal evidence",
+                        )
+                receipt_path = out / "cleanup-resolutions" / f"{entry.state['allocation_id']}.json"
+                receipt = json.loads(receipt_path.read_text())
+                receipt[section][field] = value
+                durable_json(receipt_path, receipt)
+                self.assertFalse(allocation.cleanup_resolved(row, out, journal))
+                with self.assertRaisesRegex(RecoveryBlocked, "Unresolved cleanup"):
+                    allocation.require_cleanup_resolved([row], out, journal)
+                with (out / "attempts.jsonl").open("a") as stream:
+                    with self.assertRaisesRegex(RecoveryBlocked, "terminal cleanup"):
+                        journal.reconcile_results([row], stream, scenarios.write_attempt)
+                with self.assertRaisesRegex(RecoveryBlocked, "conflicting cleanup receipt"):
+                    allocation.record_cleanup(
+                        out,
+                        allocation_id=entry.state["allocation_id"],
+                        resolved_by="operator",
+                        evidence="terminal evidence",
+                    )
+                self.assertEqual(entry.path.read_bytes(), original)
+                self.assertEqual(json.loads(receipt_path.read_text()), receipt)
+
+    def test_pre_result_receipt_without_journal_blocks_restart(self):
+        for crash_before_update in (False, True):
+            with self.subTest(crash=crash_before_update), tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp)
+                journal = self.journal(tmp)
+                durable_json(out / "experiment.json", {"experiment_id": journal.experiment_id})
+                entry = journal.begin("modal", {"app": "fake"}, "standard", "token", 0)
+                if crash_before_update:
+                    with patch.object(
+                        Allocation, "save", side_effect=OSError("journal unavailable")
+                    ):
+                        with self.assertRaisesRegex(OSError, "journal unavailable"):
+                            allocation.reconcile_manual(
+                                out,
+                                entry.state["allocation_id"],
+                                actor="operator",
+                                evidence="terminal",
+                            )
+                else:
+                    allocation.reconcile_manual(
+                        out, entry.state["allocation_id"], actor="operator", evidence="terminal"
+                    )
+                receipt_path = out / "cleanup-resolutions" / f"{entry.state['allocation_id']}.json"
+                receipt = receipt_path.read_bytes()
+                entry.path.unlink()
+                with patch.object(allocation, "recover_allocation") as recover:
+                    with self.assertRaisesRegex(
+                        RecoveryBlocked, "Missing journal for cleanup receipt"
+                    ):
+                        self.journal(tmp).recover()
+                    recover.assert_not_called()
+                self.assertEqual(receipt_path.read_bytes(), receipt)
+                self.assertFalse((out / "attempts.jsonl").exists())
+
+    def test_malformed_cleanup_receipt_blocks_before_provider_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            journal = self.journal(tmp)
+            entry = journal.begin("modal", {"app": "fake"}, "standard", "token", 0)
+            directory = out / "cleanup-resolutions"
+            directory.mkdir()
+            path = directory / f"{entry.state['allocation_id']}.json"
+            for data in (b'{"schema":2,', b"\xff"):
+                with self.subTest(data=data):
+                    path.write_bytes(data)
+                    with patch.object(allocation, "recover_allocation") as recover:
+                        with self.assertRaisesRegex(RecoveryBlocked, "Malformed cleanup receipt"):
+                            self.journal(tmp).recover()
+                        recover.assert_not_called()
+                    self.assertEqual(path.read_bytes(), data)
+
+    def test_modern_receipt_without_journal_cannot_authorize_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            journal = self.journal(tmp)
+            durable_json(out / "experiment.json", {"experiment_id": journal.experiment_id})
+            entry = journal.begin("modal", {"app": "fake"}, "standard", "token", 0)
+            entry.allocated("box-1")
+            row = self.result_row(entry)
+            entry.save(result=row)
+            with (out / "attempts.jsonl").open("a") as stream:
+                scenarios.write_attempt(stream, row)
+            allocation.record_cleanup(
+                out,
+                allocation_id=entry.state["allocation_id"],
+                resolved_by="operator",
+                evidence="terminal evidence",
+            )
+            entry.path.unlink()
+            restarted = self.journal(tmp)
+            for supplied_journal in (None, restarted):
+                with self.subTest(journal=supplied_journal is not None):
+                    with self.assertRaisesRegex(RecoveryBlocked, "Missing journal"):
+                        allocation.cleanup_resolved(row, out, supplied_journal)
+                    with self.assertRaisesRegex(RecoveryBlocked, "Missing journal"):
+                        allocation.require_cleanup_resolved([row], out, supplied_journal)
+            with (out / "attempts.jsonl").open("a") as stream:
+                with self.assertRaisesRegex(RecoveryBlocked, "Missing journal"):
+                    restarted.reconcile_results([row], stream, scenarios.write_attempt)
+            with self.assertRaisesRegex(ValueError, "Unknown allocation ID"):
+                allocation.record_cleanup(
+                    out,
+                    attempt_id=allocation.cleanup_attempt_id(row),
+                    resolved_by="operator",
+                    evidence="terminal evidence",
+                )
+            self.assertEqual(scenarios.read_rows(out / "attempts.jsonl"), [row])
 
     def test_resolve_cleanup_receipt_without_journal_update_heals_on_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -797,8 +1096,8 @@ class JournalTests(unittest.TestCase):
             # Crash window: receipt published, journal still allocated.
             receipt = {
                 "schema": 1,
-                "attempt_id": scenarios.cleanup_attempt_id(row),
-                "allocation": scenarios.allocation(row),
+                "attempt_id": allocation.cleanup_attempt_id(row),
+                "allocation": allocation.resource_identity(row),
                 "confirmed_outcome": "removed",
                 "resolved_by": "operator",
                 "resolved_at": "2026-01-01T00:00:01+00:00",
@@ -806,9 +1105,7 @@ class JournalTests(unittest.TestCase):
                 "evidence": "terminal evidence",
             }
             (out / "cleanup-resolutions").mkdir()
-            durable_json(
-                out / "cleanup-resolutions" / f"{receipt['attempt_id']}.json", receipt
-            )
+            durable_json(out / "cleanup-resolutions" / f"{receipt['attempt_id']}.json", receipt)
             journal = AllocationJournal(out, {"experiment_id": "0" * 32})
             with (out / "attempts.jsonl").open("a") as stream:
                 journal.reconcile_results([row], stream, scenarios.write_attempt)

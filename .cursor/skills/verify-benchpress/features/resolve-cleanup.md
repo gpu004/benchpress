@@ -23,7 +23,7 @@ Preconditions:
 - Offline: seed a scratch experiment with one cleanup-warning row (helper does this).
 
 - **Seed and resolve.** Run `.cursor/skills/verify-benchpress/helpers/drive-resolve-cleanup.sh`.
-- **Confirm receipt.** Evidence copy of the receipt JSON has `schema: 1`, matching `attempt_id`, `confirmed_outcome: "removed"`, and nonempty `resolved_by` / `allocation_scope` / `evidence` / `resolved_at`.
+- **Confirm receipt.** Evidence copy of the receipt JSON has `schema: 2`, a `subject` bound to the exact attempt or journal allocation, matching `attempt_id`, `confirmed_outcome: "removed"`, and nonempty `resolved_by` / `allocation_scope` / `evidence` / `resolved_at`.
 - **Confirm attempts unchanged.** The helper asserts `attempts.jsonl` bytes are identical before and after the CLI call.
 - **Proof.** Keep `$BENCHPRESS_VERIFY_EVIDENCE/resolve-cleanup/` (stdout, stderr, exit code, receipt, attempts copy).
 

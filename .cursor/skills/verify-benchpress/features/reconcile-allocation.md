@@ -5,8 +5,8 @@ Reconcile records operator evidence that a durable allocation journal entry is t
 ## Sub-features
 
 - `reconcile-cli` runs `benchpress.py reconcile --out <dir> --allocation <id> --confirm-terminal --actor … --evidence …`.
-- `reconcile-phase` moves a `create_pending` or `allocated` journal file to `cleanup_confirmed` with `manual_resolution`.
-- `reconcile-idempotent` no-ops when the allocation is already `cleanup_confirmed` or `result_committed`.
+- `reconcile-phase` publishes the shared schema-2 receipt under `cleanup-resolutions/<allocation_id>.json`, then moves the journal to `cleanup_confirmed` with a `cleanup_receipt` reference.
+- `reconcile-idempotent` reuses an existing valid receipt without changing its evidence. `resolve-cleanup` reuses that same receipt for a journaled attempt.
 
 ## How to get to it (user POV)
 
@@ -23,9 +23,9 @@ Preconditions:
 - Offline: seed a scratch experiment with `experiment.json` and one `create_pending` allocation (helper does this).
 
 - **Seed and reconcile.** Run `.cursor/skills/verify-benchpress/helpers/drive-reconcile.sh`.
-- **Confirm phase.** The allocation JSON under evidence shows `phase: "cleanup_confirmed"` and a `manual_resolution` object with `actor`, `evidence`, and `recorded_at`.
+- **Confirm phase.** The allocation JSON shows `phase: "cleanup_confirmed"` and a `cleanup_receipt` reference. The referenced receipt contains `resolved_by`, `evidence`, and `resolved_at`.
 - **Confirm exit.** Process exit code is `0`.
-- **Proof.** Keep `$BENCHPRESS_VERIFY_EVIDENCE/reconcile-allocation/` (stdout, stderr, exit code, before/after allocation JSON).
+- **Proof.** Keep `$BENCHPRESS_VERIFY_EVIDENCE/reconcile-allocation/`, including the receipt, stdout, stderr, exit code, and before and after allocation JSON.
 
 ## Gotchas
 

@@ -53,18 +53,22 @@ AFTER="$EXPERIMENT/allocations/${ALLOCATION_ID}.json"
   exit 1
 }
 cp "$AFTER" "$PROOF/allocation.after.json"
+cp "$EXPERIMENT/cleanup-resolutions/${ALLOCATION_ID}.json" "$PROOF/receipt.json"
 
-uv run --locked python - <<'PY' "$PROOF/allocation.before.json" "$PROOF/allocation.after.json"
+uv run --locked python - <<'PY' "$PROOF/allocation.before.json" "$PROOF/allocation.after.json" "$PROOF/receipt.json"
 import json, sys
 before = json.loads(open(sys.argv[1]).read())
 after = json.loads(open(sys.argv[2]).read())
 assert before["phase"] == "create_pending"
 assert after["phase"] == "cleanup_confirmed"
 assert after["allocation_id"] == before["allocation_id"]
-manual = after["manual_resolution"]
-assert manual["actor"] == "verify-benchpress"
-assert "scratch" in manual["evidence"]
-assert manual["recorded_at"]
+receipt = json.loads(open(sys.argv[3]).read())
+assert after["cleanup_receipt"] == f'cleanup-resolutions/{before["allocation_id"]}.json'
+assert receipt["schema"] == 2
+assert receipt["subject"]["allocation_id"] == before["allocation_id"]
+assert receipt["resolved_by"] == "verify-benchpress"
+assert "scratch" in receipt["evidence"]
+assert receipt["resolved_at"]
 assert after["cleanup_confirmed_at"]
 print("drive-reconcile: allocation phase checks ok")
 PY

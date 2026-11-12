@@ -9,20 +9,27 @@ import uuid
 from datetime import date
 from pathlib import Path
 
-from allocation import RecoveryBlocked, reconcile_manual
-from constants import (
-    DEADLINE_MS,
-    EXEC_PROBE_RUNS,
-    RATIO_MIN_VERIFIED,
-    SERIES_BLOCKS,
-    WARM_RUNS,
-    WORKLOADS,
-)
-from lifecycle import NODE, PING, Session, error_text, run_mode, verify
-from providers import PAYLOAD, PROVIDERS, ROOT, VARIANTS, Sandbox, prepare
+from allocation import RecoveryBlocked, reconcile_manual, resolve_cleanup
+from constants import DEADLINE_MS as DEADLINE_MS
+from constants import EXEC_PROBE_RUNS as EXEC_PROBE_RUNS
+from constants import RATIO_MIN_VERIFIED as RATIO_MIN_VERIFIED
+from constants import SERIES_BLOCKS as SERIES_BLOCKS
+from constants import WARM_RUNS as WARM_RUNS
+from constants import WORKLOADS
+from lifecycle import NODE as NODE
+from lifecycle import PING as PING
+from lifecycle import Session as Session
+from lifecycle import error_text, run_mode
+from lifecycle import verify as verify
+from providers import PAYLOAD as PAYLOAD
+from providers import PROVIDERS, ROOT, VARIANTS, prepare
+from providers import Sandbox as Sandbox
 from report import report
-from scenarios import MODES, fingerprint, resolve_cleanup, run_series, schedule
-from stats import bootstrap_median, interval, ratio_ready
+from scenarios import MODES, fingerprint, run_series
+from scenarios import schedule as schedule
+from stats import bootstrap_median as bootstrap_median
+from stats import interval as interval
+from stats import ratio_ready as ratio_ready
 
 
 def settings(path):
@@ -105,6 +112,10 @@ def main():
     reconcile.add_argument("--confirm-terminal", action="store_true", required=True)
     reconcile.add_argument("--actor", required=True)
     reconcile.add_argument("--evidence", required=True)
+    reconcile.add_argument("--allocation-scope", help="Verified provider account and allocation")
+    reconcile.add_argument(
+        "--confirmed-outcome", choices=("removed", "absent", "terminal"), default="terminal"
+    )
     args = parser.parse_args()
     try:
         if args.action == "resolve-cleanup":
@@ -118,10 +129,19 @@ def main():
             )
             print(json.dumps(receipt, indent=2))
             return 0
-        config = settings(args.config)
         if args.action == "reconcile":
-            reconcile_manual(args.out, args.allocation, actor=args.actor, evidence=args.evidence)
-        elif args.action == "report":
+            receipt = reconcile_manual(
+                args.out,
+                args.allocation,
+                actor=args.actor,
+                evidence=args.evidence,
+                allocation_scope=args.allocation_scope,
+                confirmed_outcome=args.confirmed_outcome,
+            )
+            print(json.dumps(receipt, indent=2))
+            return 0
+        config = settings(args.config)
+        if args.action == "report":
             report(args.path)
         elif args.action == "smoke":
             if args.existing and args.provider != "namespace":
