@@ -7,7 +7,7 @@ dependencies = ["e2b==2.63.0", "modal==1.6.3"]
 [tool.uv]
 package = false
 required-version = "==0.13.7"
-exclude-newer-package = { "markdown-it-py" = false, pyqwest = false }
+exclude-newer-package = { "markdown-it-py" = false, pyqwest = false, hegeltest = false }
 constraint-dependencies = ["markdown-it-py==4.3.0", "protobuf-py-ext==0.7.0"]
 # E2B 2.63.0 declares upper bounds below these versions.
 override-dependencies = [
@@ -16,3 +16,27 @@ override-dependencies = [
     "pyqwest==0.14.0",
     "wcmatch==12.0.1",
 ]
+
+[dependency-groups]
+dev = [
+    "hegeltest==0.4.3",
+    "ruff==0.17.4",
+    "ty==0.0.99",
+]
+
+[tool.ruff]
+target-version = "py315"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ty]
+baseline = "ty-baseline.json"
+
+[tool.ty.environment]
+python-version = "3.15"
+
+[tool.ty.src]
+include = ["*.py", "report"]
+exclude = ["results", ".venv"]

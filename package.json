@@ -1,0 +1,14 @@
+{
+  "name": "benchpress",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "oxlint payload",
+    "check": "oxlint --type-check-only payload"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "oxlint": "1.92.0",
+    "oxlint-tsgolint": "7.0.2006"
+  }
+}

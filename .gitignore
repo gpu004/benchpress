@@ -4,5 +4,8 @@
 !.env.example
 __pycache__/
 *.pyc
+.hegel/
 /results/
 /benchpress.local.toml
+/payload/.benchpress-variant
+/node_modules/

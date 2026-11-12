@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "checkJs": true,
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "esnext",
+    "noEmit": true,
+    "strict": true,
+    "types": ["node"]
+  },
+  "include": ["payload/**/*.mjs", "payload/**/*.js"],
+  "exclude": ["node_modules", "payload/install-package/node_modules"]
+}

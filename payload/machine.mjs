@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { availableParallelism, cpus, totalmem } from 'node:os';
 
+/** @param {string} path */
 function read(path) {
   try { return readFileSync(path, 'utf8').trim(); } catch { return null; }
 }
